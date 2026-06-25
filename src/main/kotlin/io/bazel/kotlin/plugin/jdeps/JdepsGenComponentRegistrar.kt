@@ -14,7 +14,7 @@ import java.nio.file.Paths
 
 @OptIn(org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi::class)
 class JdepsGenComponentRegistrar : CompilerPluginRegistrar() {
-  override val pluginId: String = "io.bazel.kotlin.plugin.jdeps.JdepsGenComponentRegistrar"
+  // CompilerPluginRegistrar.pluginId does not exist in Kotlin 2.2.20 (added in 2.3+).
 
   override val supportsK2: Boolean
     get() = true

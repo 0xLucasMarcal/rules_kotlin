@@ -33,7 +33,8 @@ import org.jetbrains.kotlin.resolve.jvm.extensions.AnalysisHandlerExtension
  */
 @OptIn(org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi::class)
 class SkipCodeGen : CompilerPluginRegistrar() {
-  override val pluginId: String = COMPILER_PLUGIN_ID
+  // CompilerPluginRegistrar.pluginId does not exist in Kotlin 2.2.20 (added in 2.3+);
+  // COMPILER_PLUGIN_ID is still exposed via the companion for plugin registration.
 
   override val supportsK2: Boolean
     get() = false

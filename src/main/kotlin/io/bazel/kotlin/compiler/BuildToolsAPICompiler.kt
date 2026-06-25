@@ -15,51 +15,24 @@
  */
 package io.bazel.kotlin.compiler
 
-import org.jetbrains.kotlin.buildtools.api.CompilationResult
-import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
-import org.jetbrains.kotlin.buildtools.api.KotlinToolchains
-import org.jetbrains.kotlin.buildtools.api.getToolchain
-import org.jetbrains.kotlin.buildtools.api.jvm.JvmPlatformToolchain
 import org.jetbrains.kotlin.cli.common.ExitCode
-import java.nio.file.Path
 
+/**
+ * Stub for the experimental Build Tools API compiler.
+ *
+ * The real implementation targets the redesigned Kotlin 2.4.0 Build Tools API
+ * (`KotlinToolchains` / `JvmPlatformToolchain` / build sessions), which does not exist in the
+ * Kotlin 2.2.20 build-tools API this fork is pinned to. This toolchain never enables
+ * `experimental_build_tools_api`, so `BazelK2JVMCompiler` is always used and this class is never
+ * loaded at runtime; it exists only to satisfy the reflective class lookup in KotlinToolchain.
+ */
 @Suppress("unused")
 class BuildToolsAPICompiler {
-  @OptIn(ExperimentalBuildToolsApi::class)
   fun exec(
     errStream: java.io.PrintStream,
     vararg args: String,
-  ): ExitCode {
-    System.setProperty("zip.handler.uses.crc.instead.of.timestamp", "true")
-
-    val kotlinToolchains = KotlinToolchains.loadImplementation(this.javaClass.classLoader!!)
-
-    // Create compilation operation with empty sources and dummy destination
-    // (the actual sources/destination will be set via applyArgumentStrings)
-    val operationBuilder =
-      kotlinToolchains
-        .getToolchain<JvmPlatformToolchain>()
-        .jvmCompilationOperationBuilder(
-          emptyList(),
-          Path.of("."),
-        )
-
-    // Apply raw CLI arguments - this parses the args and sets all compiler options
-    // TODO: we can use actual typed API after we get rid of BazelK2JVMCompiler and use BTAPI exclusively
-    operationBuilder.compilerArguments.applyArgumentStrings(args.toList())
-
-    // Execute the compilation
-    val result =
-      kotlinToolchains.createBuildSession().use { session ->
-        session.executeOperation(operationBuilder.build())
-      }
-
-    // BTAPI returns a different type than K2JVMCompiler (CompilationResult vs ExitCode).
-    return when (result) {
-      CompilationResult.COMPILATION_SUCCESS -> ExitCode.OK
-      CompilationResult.COMPILATION_ERROR -> ExitCode.COMPILATION_ERROR
-      CompilationResult.COMPILATION_OOM_ERROR -> ExitCode.OOM_ERROR
-      CompilationResult.COMPILER_INTERNAL_ERROR -> ExitCode.INTERNAL_ERROR
-    }
-  }
+  ): ExitCode =
+    throw UnsupportedOperationException(
+      "The experimental Build Tools API compiler is not supported with Kotlin 2.2.20 in this rules_kotlin fork.",
+    )
 }

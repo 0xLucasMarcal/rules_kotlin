@@ -15,9 +15,9 @@
  */
 package io.bazel.kotlin.ksp2
 
+import com.google.devtools.ksp.impl.CommandLineKSPLogger
 import com.google.devtools.ksp.impl.KotlinSymbolProcessing
 import com.google.devtools.ksp.processing.KSPJvmConfig
-import com.google.devtools.ksp.processing.KspGradleLogger
 import com.google.devtools.ksp.processing.SymbolProcessorProvider
 import java.io.File
 import java.util.ServiceLoader
@@ -85,11 +85,14 @@ class Ksp2Invoker(
           jdkHome?.let { this.jdkHome = it }
           this.processorOptions = processorOptions
           this.mapAnnotationArgumentsInJava = true
-          this.experimentalPsiResolution = experimentalPsiResolution
+          // KSPJvmConfig.experimentalPsiResolution does not exist in KSP 2.2.20-2.0.4
+          // (pinned to match this repo's Kotlin version), so the flag is intentionally
+          // not applied here. The execute() parameter is kept for reflective ABI parity.
         }.build()
 
-    // Create logger and execute
-    val logger = KspGradleLogger(logLevel)
+    // Create logger and execute. KspGradleLogger is not present in KSP 2.2.20-2.0.4;
+    // CommandLineKSPLogger is the available KSPLogger implementation.
+    val logger = CommandLineKSPLogger()
     val ksp = KotlinSymbolProcessing(kspConfig, processors, logger)
 
     return ksp.execute().code
