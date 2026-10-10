@@ -21,6 +21,7 @@ _ARTIFACTS = [
     ("reflect", "kotlin-reflect"),
     ("daemon_client", "kotlin-daemon-client"),
     ("script_runtime", "kotlin-script-runtime"),
+    ("tooling_core", "kotlin-tooling-core"),
 ]
 
 _CHECKSUMS = {
@@ -32,6 +33,7 @@ _CHECKSUMS = {
     "reflect_sha256": "reflectsha",
     "script_runtime_sha256": "scriptsha",
     "stdlib_sha256": "stdlibsha",
+    "tooling_core_sha256": "toolingsha",
 }
 
 def _release(version = "2.4.0"):
@@ -85,7 +87,7 @@ def _build_file_declares_the_runtime_test(ctx):
     asserts.true(env, 'compiler = [":kotlin-compiler-embeddable.jar"]' in build_file, build_file)
     asserts.true(env, 'kapt = [":kotlin-annotation-processing-embeddable.jar"]' in build_file, build_file)
     asserts.true(env, 'jvm_abi_gen = [":jvm-abi-gen.jar"]' in build_file, build_file)
-    asserts.true(env, 'libraries = [":kotlin-daemon-client.jar", ":kotlin-stdlib.jar", ":kotlin-reflect.jar", ":kotlin-script-runtime.jar", ' in build_file, build_file)
+    asserts.true(env, 'libraries = [":kotlin-daemon-client.jar", ":kotlin-stdlib.jar", ":kotlin-reflect.jar", ":kotlin-script-runtime.jar", ":kotlin-tooling-core.jar", ' in build_file, build_file)
     asserts.true(env, "jdeps-gen-embeddable" in build_file, build_file)
     asserts.true(env, "kotlinx_coroutines_core_jvm" in build_file, build_file)
     asserts.true(env, "kotlin-compiler.jar" not in build_file, build_file)
