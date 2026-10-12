@@ -109,9 +109,13 @@ class WorkerContext private constructor(
     logging: ScopeLogging,
     /**
      * The digests Bazel sent with the work request, as hex strings by execroot-relative input
-     * path. Empty outside the persistent worker protocol.
+     * path. Empty outside the persistent worker protocol. The keys are the paths the request
+     * names, not their [RequestPaths.resolve]d locations: they identify the inputs the same way in
+     * every sandbox.
      */
     val inputDigests: Map<String, String> = emptyMap(),
+    /** Locates the files of the work request. */
+    val paths: RequestPaths = RequestPaths.WORKING_DIRECTORY,
   ) : ScopeLogging by logging {
     /** resultOf a status supplier that includes information collected in the Context. */
     fun resultOf(executeTaskIn: (TaskContext) -> Status): TaskResult {
@@ -138,7 +142,12 @@ class WorkerContext private constructor(
       }
   }
 
-  /** doTask work in a TaskContext. */
+  /**
+   * doTask work in a TaskContext.
+   *
+   * @param sandboxDir the directory the request's files live in, relative to the working
+   *   directory, under multiplex sandboxing; it is also the task's directory.
+   */
   fun doTask(
     name: String,
     sandboxDir: Path? = null,
@@ -147,7 +156,13 @@ class WorkerContext private constructor(
   ): TaskResult {
     info { "start task $name" }
     return if (sandboxDir != null) {
-      TaskContext(sandboxDir, logging = narrowTo(name), inputDigests = inputDigests).resultOf(task)
+      val sandbox = sandboxDir.toAbsolutePath().normalize()
+      TaskContext(
+        sandbox,
+        logging = narrowTo(name),
+        inputDigests = inputDigests,
+        paths = RequestPaths.sandboxed(sandbox),
+      ).resultOf(task)
     } else {
       WorkingDirectoryContext
         .use {

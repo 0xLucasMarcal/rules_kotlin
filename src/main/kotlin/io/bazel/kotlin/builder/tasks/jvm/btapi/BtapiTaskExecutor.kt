@@ -37,12 +37,14 @@ import io.bazel.kotlin.builder.tasks.jvm.stubs
 import io.bazel.kotlin.builder.tasks.toRuntime
 import io.bazel.kotlin.builder.toolchain.CompilationStatusException
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
+import io.bazel.kotlin.builder.utils.realPathOf
 import io.bazel.kotlin.compiler.CompilationUnit
 import io.bazel.kotlin.compiler.CompilerConfiguration
 import io.bazel.kotlin.compiler.CompilerPluginSpec
 import io.bazel.kotlin.compiler.KotlinBtapiCompiler
 import io.bazel.kotlin.model.JvmCompilationTask
 import io.bazel.kotlin.model.JvmCompilationTask.Inputs.PluginPhase
+import io.bazel.worker.RequestPaths
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.PrintStream
@@ -133,7 +135,9 @@ class BtapiTaskExecutor(
 
         if (outputs.jar.isNotEmpty()) {
           if (instrumentCoverage) {
-            context.execute("create instrumented jar", ::createCoverageInstrumentedJar)
+            context.execute("create instrumented jar") {
+              createCoverageInstrumentedJar(context.paths)
+            }
           } else {
             context.execute("create jar", ::createOutputJar)
           }
@@ -160,19 +164,26 @@ class BtapiTaskExecutor(
     }
   }
 
+  /**
+   * The compiler loaded from the [classpath] jars, cached across requests until their
+   * [fingerprint] changes. The compiler outlives the request, and under multiplex sandboxing the
+   * request's sandbox, so it loads the files the jars resolve to, which every sandbox shares.
+   */
   fun getCompilerInvoker(
     classpath: List<String>,
     fingerprint: String,
-  ): KotlinBtapiCompiler =
-    invokers
-      .compute(classpath) { _, existing ->
+  ): KotlinBtapiCompiler {
+    val jars = classpath.map(::realPathOf)
+    return invokers
+      .compute(jars) { _, existing ->
         if (existing != null && existing.fingerprint == fingerprint) {
           existing
         } else {
-          CacheEntry(loadCompilerInvoker(classpath), fingerprint)
+          CacheEntry(loadCompilerInvoker(jars), fingerprint)
         }
       }!!
       .compiler
+  }
 
   private fun loadCompilerInvoker(classpath: List<String>): KotlinBtapiCompiler {
     classpath.forEach { jar ->
@@ -399,7 +410,7 @@ class BtapiTaskExecutor(
       compilationUnit =
         TaskCompilationUnit(
           sources = sources,
-          classpath = computeClasspath() + directories.generatedClasses,
+          classpath = computeClasspath(context.paths) + directories.generatedClasses,
           friendPaths = friendPaths,
           destination = destination,
         ),
@@ -419,7 +430,7 @@ class BtapiTaskExecutor(
    * The compile classpath, honoring the jdeps-based reduced classpath mode. Mirrors the legacy
    * baseArgs classpath computation so both paths compile against the same entries.
    */
-  private fun JvmCompilationTask.computeClasspath(): List<String> =
+  private fun JvmCompilationTask.computeClasspath(paths: RequestPaths): List<String> =
     when (info.reducedClasspathMode) {
       "KOTLINBUILDER_REDUCED" -> {
         val transitiveDepsForCompile = mutableSetOf<String>()
@@ -428,7 +439,7 @@ class BtapiTaskExecutor(
             val deps = Deps.Dependencies.parseFrom(it)
             deps.dependencyList.forEach { dep ->
               if (dep.kind == Deps.Dependency.Kind.EXPLICIT) {
-                transitiveDepsForCompile.add(dep.path)
+                transitiveDepsForCompile.add(paths.resolve(dep.path))
               }
             }
           }

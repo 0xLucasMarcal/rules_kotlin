@@ -19,6 +19,7 @@ package io.bazel.kotlin.builder.toolchain
 import com.google.protobuf.MessageOrBuilder
 import com.google.protobuf.TextFormat
 import io.bazel.kotlin.model.CompilationTaskInfo
+import io.bazel.worker.RequestPaths
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -34,6 +35,12 @@ class CompilationTaskContext(
       .getPath("")
       .toAbsolutePath()
       .toString() + File.separator,
+  /**
+   * Locates the files of the work request. The task's paths are resolved; the paths it records or
+   * reports, such as the sources in the coverage metadata and in compiler diagnostics, are the
+   * ones the request names.
+   */
+  val paths: RequestPaths = RequestPaths.WORKING_DIRECTORY,
 ) {
   private val start = System.currentTimeMillis()
   private var timings: MutableList<String>?
@@ -123,6 +130,7 @@ class CompilationTaskContext(
       ByteArrayInputStream(outputStream.toByteArray())
         .bufferedReader()
         .readLines()
+        .map(paths::relativize)
     if (result != 0) {
       if (printOnFail) {
         printCompilerOutput(output)

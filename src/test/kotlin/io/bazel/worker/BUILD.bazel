@@ -13,6 +13,18 @@ kt_jvm_test(
 )
 
 kt_jvm_test(
+    name = "RequestPathsTest",
+    srcs = [
+        "RequestPathsTest.kt",
+    ],
+    test_class = "io.bazel.worker.RequestPathsTest",
+    deps = [
+        "//src/main/kotlin/io/bazel/worker",
+        "@kotlin_rules_maven_test//:com_google_truth_truth",
+    ],
+)
+
+kt_jvm_test(
     name = "InvocationWorkerTest",
     srcs = [
         "InvocationWorkerTest.kt",
@@ -28,6 +40,7 @@ test_suite(
     name = "worker_tests",
     tests = [
         ":InvocationWorkerTest",
+        ":RequestPathsTest",
         ":WorkerContextTest",
     ],
 )

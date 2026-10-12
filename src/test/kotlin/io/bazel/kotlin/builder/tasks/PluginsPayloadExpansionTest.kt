@@ -48,7 +48,7 @@ class PluginsPayloadExpansionTest {
       }
 
     WorkerContext.run(named = "test") {
-      doTask("expand", sandboxDir = root) { taskContext ->
+      doTask("expand") { taskContext ->
         KotlinBuilder(capturingExecutor).build(
           taskContext,
           args =
