@@ -47,6 +47,7 @@ java_library(
     deps = _COMMON_DEPS + [
         "//kotlin/compiler:kotlin-reflect",
         "//src/main/kotlin/io/bazel/kotlin/builder/tasks",
+        "//src/main/kotlin/io/bazel/kotlin/compiler",
         "//third_party:autovalue",
     ],
 )

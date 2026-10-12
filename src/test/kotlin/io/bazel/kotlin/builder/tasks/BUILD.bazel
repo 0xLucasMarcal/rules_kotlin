@@ -61,6 +61,12 @@ kt_rules_test(
 )
 
 kt_rules_test(
+    name = "KotlinBtapiCompilerIncrementalTest",
+    srcs = ["jvm/KotlinBtapiCompilerIncrementalTest.java"],
+    deps = ["//src/main/kotlin/io/bazel/kotlin/compiler"],
+)
+
+kt_rules_test(
     name = "KotlinBuilderJvmBtaTest",
     srcs = ["jvm/KotlinBuilderJvmBtaTest.java"],
     data = [
@@ -204,6 +210,7 @@ test_suite(
         ":BtapiRuntimeFlagsValidationTest",
         ":JdepsMergerTest",
         ":JdepsParserTest",
+        ":KotlinBtapiCompilerIncrementalTest",
         ":KotlinBuilderBuildTest",
         ":KotlinBuilderJvmAbiTest",
         ":KotlinBuilderJvmBasicTest",
