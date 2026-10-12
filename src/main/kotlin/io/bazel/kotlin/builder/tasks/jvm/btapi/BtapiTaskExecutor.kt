@@ -40,6 +40,7 @@ import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.compiler.CompilationUnit
 import io.bazel.kotlin.compiler.CompilerConfiguration
 import io.bazel.kotlin.compiler.CompilerPluginSpec
+import io.bazel.kotlin.compiler.IncrementalCompilationSpec
 import io.bazel.kotlin.compiler.KotlinBtapiCompiler
 import io.bazel.kotlin.model.JvmCompilationTask
 import io.bazel.kotlin.model.JvmCompilationTask.Inputs.PluginPhase
@@ -214,6 +215,7 @@ class BtapiTaskExecutor(
               arguments = emptyList(),
               friendPaths = emptyList(),
               sources = inputs.kotlinSourcesList + inputs.javaSourcesList,
+              classpath = computeClasspath() + directories.generatedClasses,
               descriptors = descriptors,
               destination = directories.generatedClasses,
               out = out,
@@ -233,7 +235,26 @@ class BtapiTaskExecutor(
     context: CompilationTaskContext,
     compiler: KotlinBtapiCompiler,
     runtime: BtapiRuntime,
-  ): List<String> {
+  ): List<String> =
+    invokeMainCompilation(
+      context,
+      compiler,
+      sources = inputs.javaSourcesList + inputs.kotlinSourcesList,
+      classpath = computeClasspath() + directories.generatedClasses,
+      destination = directories.classes,
+      descriptors = compilerPlugins(runtime, directories.abiClasses),
+      incremental = null,
+    )
+
+  /**
+   * The compiler plugins of the main compilation.
+   *
+   * @param abiOutputDir the directory the ABI plugin writes the ABI classes to.
+   */
+  private fun JvmCompilationTask.compilerPlugins(
+    runtime: BtapiRuntime,
+    abiOutputDir: String,
+  ): List<PluginDescriptor> {
     val descriptors = mutableListOf<PluginDescriptor>()
 
     if (outputs.jdeps.isNotEmpty()) {
@@ -253,7 +274,7 @@ class BtapiTaskExecutor(
       )
     }
     if (outputs.abijar.isNotEmpty()) {
-      val abiOptions = mutableListOf("outputDir=${directories.abiClasses}")
+      val abiOptions = mutableListOf("outputDir=$abiOutputDir")
       if (info.treatInternalAsPrivateInAbiJar) {
         abiOptions.add("treatInternalAsPrivate=true")
       }
@@ -278,7 +299,18 @@ class BtapiTaskExecutor(
       )
     }
     descriptors.addAll(userPluginDescriptors(PluginPhase.PLUGIN_PHASE_COMPILE, runtime))
+    return descriptors
+  }
 
+  private fun JvmCompilationTask.invokeMainCompilation(
+    context: CompilationTaskContext,
+    compiler: KotlinBtapiCompiler,
+    sources: List<String>,
+    classpath: List<String>,
+    destination: String,
+    descriptors: List<CompilerPluginSpec>,
+    incremental: IncrementalCompilationSpec?,
+  ): List<String> {
     context.whenTracing {
       context.printLines(
         "Kotlin Compiler plugins:\n",
@@ -292,13 +324,16 @@ class BtapiTaskExecutor(
           compiler,
           arguments = info.passthroughFlagsList,
           friendPaths = info.friendPathsList,
-          sources = inputs.javaSourcesList + inputs.kotlinSourcesList,
+          sources = sources,
+          classpath = classpath,
           descriptors = descriptors,
-          destination = directories.classes,
+          destination = destination,
           out = out,
+          incremental = incremental,
         )
       },
       printOnFail = false,
+      printOnSuccess = false,
     )
   }
 
@@ -390,16 +425,18 @@ class BtapiTaskExecutor(
     arguments: List<String>,
     friendPaths: List<String>,
     sources: List<String>,
-    descriptors: List<PluginDescriptor>,
+    classpath: List<String>,
+    descriptors: List<CompilerPluginSpec>,
     destination: String,
     out: PrintStream,
+    incremental: IncrementalCompilationSpec? = null,
   ): Int =
     compiler.exec(
       errStream = out,
       compilationUnit =
         TaskCompilationUnit(
           sources = sources,
-          classpath = computeClasspath() + directories.generatedClasses,
+          classpath = classpath,
           friendPaths = friendPaths,
           destination = destination,
         ),
@@ -413,6 +450,7 @@ class BtapiTaskExecutor(
           verbose = context.whenTracing { true } == true,
         ),
       plugins = descriptors,
+      incrementalCompilation = incremental,
     )
 
   /**
