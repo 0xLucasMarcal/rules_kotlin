@@ -47,6 +47,7 @@ import io.bazel.kotlin.model.JvmCompilationTask.Inputs.PluginPhase
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.PrintStream
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 
@@ -54,14 +55,34 @@ import java.util.concurrent.ConcurrentHashMap
 // Build Tools API runtime (BtapiRuntime).
 private const val JVM_ABI_GEN_PLUGIN_ID = "org.jetbrains.kotlin.jvm.abi"
 private const val KAPT_PLUGIN_ID = "org.jetbrains.kotlin.kapt3"
-private const val JDEPS_GEN_PLUGIN_ID = "io.bazel.kotlin.plugin.jdeps.JDepsGen"
+internal const val JDEPS_GEN_PLUGIN_ID = "io.bazel.kotlin.plugin.jdeps.JDepsGen"
+
+// The placeholders of user plugin options that expand to directories of the action.
+private val ACTION_DIRECTORY_TOKENS =
+  listOf("{generatedClasses}", "{stubs}", "{temp}", "{generatedSources}")
 
 /**
  * Executes JVM compilation tasks through the typed Build Tools API path.
+ *
+ * @param incrementalCompilation keeps the per-target state of tasks that compile incrementally.
  */
 class BtapiTaskExecutor(
   private val btapiClassLoader: ClassLoader,
+  private val incrementalCompilation: IncrementalCompilation,
 ) : JvmTaskExecutor {
+  constructor(btapiClassLoader: ClassLoader) :
+    this(btapiClassLoader, IncrementalCompilation(DEFAULT_INCREMENTAL_COMPILATION_ROOT))
+
+  companion object {
+    /**
+     * Relative to the worker's working directory, the execution root: inside the output tree, so
+     * `bazel clean` discards the state.
+     */
+    @JvmField
+    val DEFAULT_INCREMENTAL_COMPILATION_ROOT: Path =
+      Paths.get("bazel-out", "_kotlin_ic").toAbsolutePath()
+  }
+
   /** api_impl_classpath -> compiler invoker map */
   private val invokers = ConcurrentHashMap<List<String>, CacheEntry>()
 
@@ -235,8 +256,38 @@ class BtapiTaskExecutor(
     context: CompilationTaskContext,
     compiler: KotlinBtapiCompiler,
     runtime: BtapiRuntime,
-  ): List<String> =
-    invokeMainCompilation(
+  ): List<String> {
+    if (info.incrementalCompilation) {
+      val blocker = incrementalCompilationBlocker()
+      if (blocker == null) {
+        incrementalCompilation
+          .compile(
+            context,
+            this,
+            runtime,
+            compiler,
+            classpath = computeClasspath(),
+            plugins = { outputs ->
+              compilerPlugins(runtime, outputs.abiClasses, outputs.sourceDependencies)
+            },
+          ) { invocation ->
+            invokeMainCompilation(
+              context,
+              compiler,
+              sources = invocation.sources,
+              classpath = computeClasspath(),
+              destination = invocation.destination,
+              descriptors = invocation.plugins,
+              incremental = invocation.incrementalCompilation,
+            )
+          }?.let { return it }
+      } else {
+        context.whenTracing {
+          printLines("incremental compilation skipped", listOf(blocker))
+        }
+      }
+    }
+    return invokeMainCompilation(
       context,
       compiler,
       sources = inputs.javaSourcesList + inputs.kotlinSourcesList,
@@ -245,15 +296,55 @@ class BtapiTaskExecutor(
       descriptors = compilerPlugins(runtime, directories.abiClasses),
       incremental = null,
     )
+  }
+
+  /**
+   * Why the task cannot compile incrementally, or null if it can. Incremental compilation needs the
+   * compiled classes of every source, and only supports plugins whose outputs are classes: other
+   * per-action outputs would only cover the recompiled sources.
+   */
+  private fun JvmCompilationTask.incrementalCompilationBlocker(): String? {
+    val kaptRuns =
+      (inputs.processorsList.isNotEmpty() || inputs.stubsPluginClasspathList.isNotEmpty()) &&
+        inputs.kotlinSourcesList.isNotEmpty() &&
+        outputs.generatedClassJar.isNotEmpty()
+    val pluginWithActionOutputs =
+      inputs.pluginsList.firstOrNull { plugin ->
+        PluginPhase.PLUGIN_PHASE_COMPILE in plugin.phasesList &&
+          plugin.optionsList.any { option ->
+            ACTION_DIRECTORY_TOKENS.any { it in option.value }
+          }
+      }
+    return when {
+      outputs.jar.isEmpty() -> {
+        "the target compiles an ABI jar only"
+      }
+
+      kaptRuns -> {
+        "annotation processing with kapt"
+      }
+
+      pluginWithActionOutputs != null -> {
+        "the compiler plugin ${pluginWithActionOutputs.id} writes to the action's directories"
+      }
+
+      else -> {
+        null
+      }
+    }
+  }
 
   /**
    * The compiler plugins of the main compilation.
    *
    * @param abiOutputDir the directory the ABI plugin writes the ABI classes to.
+   * @param sourceDependencies the file the jdeps plugin records the dependencies of each source
+   *   in, for incremental compilation.
    */
   private fun JvmCompilationTask.compilerPlugins(
     runtime: BtapiRuntime,
     abiOutputDir: String,
+    sourceDependencies: String? = null,
   ): List<PluginDescriptor> {
     val descriptors = mutableListOf<PluginDescriptor>()
 
@@ -269,7 +360,8 @@ class BtapiTaskExecutor(
             ) +
               inputs.directDependenciesList.map { "direct_dependencies=$it" } +
               inputs.classpathList.map { "full_classpath=$it" } +
-              listOf("strict_kotlin_deps=${info.strictKotlinDeps}"),
+              listOf("strict_kotlin_deps=${info.strictKotlinDeps}") +
+              listOfNotNull(sourceDependencies?.let { "per_source_output=$it" }),
         ),
       )
     }
