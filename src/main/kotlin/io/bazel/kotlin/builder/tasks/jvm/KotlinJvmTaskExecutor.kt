@@ -73,7 +73,7 @@ class KotlinJvmTaskExecutor(
                   context,
                   compiler,
                   args =
-                    baseArgs()
+                    baseArgs(context.paths)
                       .given(outputs.jdeps)
                       .notEmpty {
                         plugin(plugins.jdeps) {
@@ -140,7 +140,9 @@ class KotlinJvmTaskExecutor(
 
         if (outputs.jar.isNotEmpty()) {
           if (instrumentCoverage) {
-            context.execute("create instrumented jar", ::createCoverageInstrumentedJar)
+            context.execute("create instrumented jar") {
+              createCoverageInstrumentedJar(context.paths)
+            }
           } else {
             context.execute("create jar", ::createOutputJar)
           }

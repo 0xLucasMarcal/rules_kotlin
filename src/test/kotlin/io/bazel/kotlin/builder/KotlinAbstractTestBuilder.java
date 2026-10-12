@@ -24,6 +24,7 @@ import io.bazel.kotlin.model.JvmCompilationTaskOrBuilder;
 import io.bazel.kotlin.model.KotlinToolchainInfo;
 import io.bazel.kotlin.model.Platform;
 import io.bazel.kotlin.model.RuleKind;
+import io.bazel.worker.RequestPaths;
 
 import java.io.*;
 import java.nio.file.FileSystem;
@@ -160,7 +161,8 @@ abstract class KotlinAbstractTestBuilder<T extends JvmCompilationTaskOrBuilder> 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (PrintStream outputStream = new PrintStream(out)) {
             return operation.apply(new CompilationTaskContext(task.getInfo(), outputStream,
-                    instanceRoot().toAbsolutePath() + File.separator), task);
+                    instanceRoot().toAbsolutePath() + File.separator,
+                    RequestPaths.WORKING_DIRECTORY), task);
         } finally {
             outLines = unmodifiableList(
                     new BufferedReader(new InputStreamReader(new ByteArrayInputStream(out.toByteArray())))

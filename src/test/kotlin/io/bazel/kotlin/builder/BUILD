@@ -18,6 +18,7 @@ package(default_visibility = ["//src:__subpackages__"])
 _COMMON_DEPS = [
     "//src/main/kotlin/io/bazel/kotlin/builder/toolchain",
     "//src/main/kotlin/io/bazel/kotlin/builder/utils:utils",
+    "//src/main/kotlin/io/bazel/worker",
     "//src/main/protobuf:kotlin_model_java_proto",
     "//src/main/protobuf:deps_java_proto",
     "@kotlin_rules_maven_test//:com_google_truth_truth",

@@ -384,6 +384,46 @@ class JdepsMergerTest {
     ).containsExactly(usedKotlinDep)
   }
 
+  @Test
+  fun `merge in a sandbox`() {
+    // Under multiplex sandboxing, Bazel names the files relative to the execution root and stages
+    // them in the request's sandbox.
+    val sandbox = Files.createTempDirectory(wrkDir, "sandbox")
+    val unusedDep = "bazel-out/bin/libkotlin_dep.jar"
+    Files.createDirectories(sandbox.resolve(unusedDep).parent)
+    JarCreator(path = sandbox.resolve(unusedDep), normalize = true, verbose = false).also {
+      it.setJarOwner("//foo:kotlin_dep", "kt_jvm_library")
+      it.execute()
+    }
+    val kotlinJdeps = "bazel-out/bin/kt.jdeps"
+    BufferedOutputStream(Files.newOutputStream(sandbox.resolve(kotlinJdeps))).use {
+      Deps.Dependencies.newBuilder()
+        .addDependency(Dependency.newBuilder().setKind(Dependency.Kind.UNUSED).setPath(unusedDep))
+        .build()
+        .writeTo(it)
+    }
+    val mergedJdeps = "bazel-out/bin/merged.jdeps"
+
+    val result = WorkerContext.run {
+      doTask("jdepsmerge", sandboxDir = sandbox) { taskCtx ->
+        MergeJdeps(merger = merger).invoke(
+          taskCtx,
+          listOf(
+            JdepsMergerFlags.INPUTS.flag, kotlinJdeps,
+            JdepsMergerFlags.TARGET_LABEL.flag, "//foo/bar:baz",
+            JdepsMergerFlags.OUTPUT.flag, mergedJdeps,
+            JdepsMergerFlags.REPORT_UNUSED_DEPS.flag, "warn",
+          ),
+        )
+      }
+    }
+
+    assertThat(result.status).isEqualTo(SUCCESS)
+    assertThat(result.log.out.toString()).contains("'remove deps //foo:kotlin_dep' //foo/bar:baz")
+    assertThat(depsProto(sandbox.resolve(mergedJdeps)).dependencyList.map { it.path })
+      .containsExactly(unusedDep)
+  }
+
   private fun depsProto(mergedJdeps: Path) =
     Deps.Dependencies.parseFrom(BufferedInputStream(Files.newInputStream(mergedJdeps)))
 

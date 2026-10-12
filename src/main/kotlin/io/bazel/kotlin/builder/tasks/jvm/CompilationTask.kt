@@ -26,6 +26,7 @@ import io.bazel.kotlin.builder.tasks.jvm.JDepsGenerator.writeJdeps
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.builder.toolchain.KotlinToolchain
 import io.bazel.kotlin.model.JvmCompilationTask
+import io.bazel.worker.RequestPaths
 import java.io.BufferedInputStream
 import java.io.File
 import java.nio.file.Files.isDirectory
@@ -44,7 +45,14 @@ fun JvmCompilationTask.codeGenArgs(): CompilationArgs =
       "-Xfriend-paths=${it.joinToString(X_FRIENDS_PATH_SEPARATOR)}"
     }.values(info.passthroughFlagsList)
 
-fun JvmCompilationTask.baseArgs(overrides: Map<String, String> = emptyMap()): CompilationArgs {
+/**
+ * @param paths locates the files of the work request: the jdeps of the dependencies name their
+ *   jars as the request does.
+ */
+fun JvmCompilationTask.baseArgs(
+  paths: RequestPaths,
+  overrides: Map<String, String> = emptyMap(),
+): CompilationArgs {
   val classpath =
     when (info.reducedClasspathMode) {
       "KOTLINBUILDER_REDUCED" -> {
@@ -54,7 +62,7 @@ fun JvmCompilationTask.baseArgs(overrides: Map<String, String> = emptyMap()): Co
             val deps = Deps.Dependencies.parseFrom(it)
             deps.dependencyList.forEach { dep ->
               if (dep.kind == Deps.Dependency.Kind.EXPLICIT) {
-                transitiveDepsForCompile.add(dep.path)
+                transitiveDepsForCompile.add(paths.resolve(dep.path))
               }
             }
           }
@@ -113,7 +121,7 @@ private fun JvmCompilationTask.runKaptPlugin(
 ): JvmCompilationTask {
   return context.execute("kapt (${inputs.processorsList.joinToString(", ")})") {
     val sources = (inputs.kotlinSourcesList + inputs.javaSourcesList).toTypedArray()
-    baseArgs()
+    baseArgs(context.paths)
       .plus(
         plugins(
           options = inputs.stubsPluginOptionsList.filterNot { o -> o.startsWith(plugins.kapt.id) },
@@ -146,7 +154,7 @@ private fun JvmCompilationTask.runKaptPlugin(
 fun JvmCompilationTask.compileKotlin(
   context: CompilationTaskContext,
   compiler: KotlinToolchain.KotlincInvoker,
-  args: CompilationArgs = baseArgs(),
+  args: CompilationArgs = baseArgs(context.paths),
   printOnFail: Boolean = true,
 ): List<String> {
   if (inputs.kotlinSourcesList.isEmpty()) {
