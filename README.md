@@ -115,10 +115,10 @@ use_repo(rules_kotlin_extensions, "com_github_google_ksp", "com_github_jetbrains
 When a toolchain enables the Build Tools API compilation (`experimental_build_tools_api`), it
 compiles with a Build Tools API runtime: `kotlin-build-tools-impl`, the `kotlin-compiler-embeddable`
 it loads, the embeddable compiler plugins `kotlin-annotation-processing-embeddable` and
-`jvm-abi-gen`, and the five libraries of the release the compiler and the implementation need. One implementation record
-names all of them with one version and one checksum each, and one repository is built from each
-record. The repository `@btapi_impl` holds the record of the release the rules bundle, and the
-default toolchain uses its runtime, `@rules_kotlin//kotlin/compiler:btapi_runtime`.
+`jvm-abi-gen`, and the five libraries of the release the compiler and the implementation need. One
+implementation record names all of them with one version and one checksum each, and one repository
+is built from each record. The repository `@btapi_impl` holds the record of the release the rules
+bundle, and the default toolchain uses its runtime, `@rules_kotlin//kotlin/compiler:btapi_runtime`.
 
 To compile with another release, declare a record under a repository name of your choice and give
 its runtime to a toolchain. Several records coexist, one toolchain each:
@@ -325,6 +325,9 @@ How it works:
   and the requested outputs.
 * Since the outputs depend on state outside the action's inputs, the incremental `KotlinCompile`
   actions are tagged `no-remote-cache-upload`. They can still be served from a remote cache.
+* The jdeps of an incremental compilation keep the dependencies of the previous compilation, since
+  the compiler analyzes only the recompiled sources. A dependency a change stops using stays
+  recorded, and is not reported as unused, until the target compiles from scratch.
 * Targets that run kapt, and targets with compiler plugin options that refer to the action's
   directories (`{generatedClasses}`, `{stubs}`, `{temp}`, `{generatedSources}`), compile
   non-incrementally.
