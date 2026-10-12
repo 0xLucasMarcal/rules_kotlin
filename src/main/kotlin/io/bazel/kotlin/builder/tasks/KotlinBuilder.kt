@@ -34,12 +34,20 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
 @Suppress("MemberVisibilityCanBePrivate")
 class KotlinBuilder(
   private val jvmTaskExecutor: JvmTaskExecutor,
+  /**
+   * Whether the tasks compile incrementally: a worker startup flag, so that it stays out of the
+   * actions' command lines and cache keys. Only the Build Tools API compilation supports it.
+   */
+  private val incrementalCompilation: Boolean = false,
 ) {
+  private val legacyIncrementalCompilationReported = AtomicBoolean(false)
+
   companion object {
     @JvmStatic
     private val FLAGFILE_RE = Pattern.compile("""^--flagfile=((.*)-(\d+).params)$""").toRegex()
@@ -88,7 +96,6 @@ class KotlinBuilder(
       INTERNAL_JVM_ABI_GEN_CLASSPATH("--internal_jvm_abi_gen_classpath"),
       INTERNAL_KAPT_CLASSPATH("--internal_kapt_classpath"),
       INTERNAL_JDEPS_GEN_CLASSPATH("--internal_jdeps_gen_classpath"),
-      INCREMENTAL_COMPILATION("--incremental_compilation"),
     }
   }
 
@@ -137,6 +144,18 @@ class KotlinBuilder(
     val info = buildTaskInfo(argMap, ctx.inputDigests).build()
     val context =
       CompilationTaskContext(info, ctx.asPrintStream(), inputDigests = ctx.inputDigests)
+    if (incrementalCompilation &&
+      !info.toolchainInfo.hasBtapi() &&
+      legacyIncrementalCompilationReported.compareAndSet(false, true)
+    ) {
+      context.printLines(
+        "warning: incremental compilation disabled",
+        listOf(
+          "it needs the Build Tools API compilation: " +
+            "--@rules_kotlin//kotlin/settings:experimental_build_tools_api=true",
+        ),
+      )
+    }
     return Pair(argMap, context)
   }
 
@@ -186,9 +205,8 @@ class KotlinBuilder(
         )?.let {
           removeDataClassCopyIfConstructorIsPrivate = it == "true"
         }
-      argMap.optionalSingle(KotlinBuilderFlags.INCREMENTAL_COMPILATION)?.let {
-        incrementalCompilation = it == "true"
-      }
+      incrementalCompilation =
+        this@KotlinBuilder.incrementalCompilation && toolchainInfoBuilder.hasBtapi()
       this
     }
 
