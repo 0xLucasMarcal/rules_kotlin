@@ -72,6 +72,17 @@ class ArgMap(
   fun mandatory(key: Flag) = mandatory(key.flag)
 
   fun optional(key: Flag) = optional(key.flag)
+
+  /** These arguments with each value of the [keys] replaced by its [transform]. */
+  fun mapValues(
+    keys: Iterable<Flag>,
+    transform: (String) -> String,
+  ): ArgMap {
+    val flags = keys.map(Flag::flag).toSet()
+    return ArgMap(
+      map.mapValues { (key, values) -> if (key in flags) values.map(transform) else values },
+    )
+  }
 }
 
 interface Flag {

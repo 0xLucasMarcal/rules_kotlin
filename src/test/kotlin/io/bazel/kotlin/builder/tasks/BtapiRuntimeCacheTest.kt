@@ -19,9 +19,13 @@ package io.bazel.kotlin.builder.tasks
 
 import com.google.common.truth.Truth.assertThat
 import io.bazel.kotlin.builder.tasks.jvm.btapi.BtapiTaskExecutor
+import org.junit.Assume.assumeNoException
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
 
 class BtapiRuntimeCacheTest {
   @get:Rule
@@ -56,6 +60,19 @@ class BtapiRuntimeCacheTest {
   }
 
   @Test
+  fun testSandboxesShareTheCompiler() {
+    // Under multiplex sandboxing, each request's sandbox links the same jar.
+    val jar = tmp.newFile("compiler.jar").apply { writeBytes(byteArrayOf(1, 2, 3)) }.toPath()
+    val sandboxed =
+      listOf("1", "2").map { sandbox ->
+        val link = tmp.newFolder("__sandbox", sandbox).toPath().resolve("compiler.jar")
+        listOf(symlink(link, jar).toString())
+      }
+    assertThat(executor.getCompilerInvoker(sandboxed[1], "v1"))
+      .isSameInstanceAs(executor.getCompilerInvoker(sandboxed[0], "v1"))
+  }
+
+  @Test
   fun testClasspathOrderSelectsDifferentRuntime() {
     val first = tmp.newFile("first.jar").apply { writeBytes(byteArrayOf(1)) }
     val second = tmp.newFile("second.jar").apply { writeBytes(byteArrayOf(2)) }
@@ -63,4 +80,19 @@ class BtapiRuntimeCacheTest {
     assertThat(executor.getCompilerInvoker(classpath.reversed(), "v1"))
       .isNotSameInstanceAs(executor.getCompilerInvoker(classpath, "v1"))
   }
+
+  /** Links [link] to [target], as sandboxes stage inputs; skips the test without link support. */
+  private fun symlink(
+    link: Path,
+    target: Path,
+  ): Path =
+    try {
+      Files.createSymbolicLink(link, target)
+    } catch (e: IOException) {
+      assumeNoException(e)
+      throw e
+    } catch (e: UnsupportedOperationException) {
+      assumeNoException(e)
+      throw e
+    }
 }

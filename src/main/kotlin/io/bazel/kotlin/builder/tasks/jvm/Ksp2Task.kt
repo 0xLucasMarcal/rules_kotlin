@@ -21,6 +21,8 @@ import io.bazel.kotlin.builder.utils.ArgMap
 import io.bazel.kotlin.builder.utils.ArgMaps
 import io.bazel.kotlin.builder.utils.Flag
 import io.bazel.kotlin.builder.utils.fingerprintOf
+import io.bazel.kotlin.builder.utils.realPathOf
+import io.bazel.worker.RequestPaths
 import io.bazel.worker.Status
 import io.bazel.worker.Work
 import io.bazel.worker.WorkerContext
@@ -88,9 +90,16 @@ class Ksp2Task : Work {
         if (eqIdx >= 0) entry.substring(0, eqIdx) to entry.substring(eqIdx + 1) else entry to ""
       }
 
+    /**
+     * The classloader of the [processorClasspath] jars, cached across requests until their
+     * [inputDigests] change. The jars are identified by the paths the request names, which are the
+     * same in every sandbox, and loaded from the files they resolve to ([paths]), which outlive the
+     * request's sandbox.
+     */
     fun getKspClassLoader(
       processorClasspath: List<String>,
       inputDigests: Map<String, String> = emptyMap(),
+      paths: RequestPaths = RequestPaths.WORKING_DIRECTORY,
     ): URLClassLoader {
       val sortedClasspath = processorClasspath.sorted()
       val cacheKey = sortedClasspath.joinToString(File.pathSeparator)
@@ -105,7 +114,9 @@ class Ksp2Task : Work {
           }
           CacheEntry(
             URLClassLoader(
-              processorClasspath.map { File(it).toURI().toURL() }.toTypedArray(),
+              processorClasspath
+                .map { File(realPathOf(paths.resolve(it))).toURI().toURL() }
+                .toTypedArray(),
               ClassLoader.getSystemClassLoader(),
             ),
             fingerprint,
@@ -135,7 +146,10 @@ class Ksp2Task : Work {
 
     val lines =
       FLAGFILE_RE.matchEntire(argsList[0])?.groups?.get(1)?.let {
-        Files.readAllLines(FileSystems.getDefault().getPath(it.value), StandardCharsets.UTF_8)
+        Files.readAllLines(
+          FileSystems.getDefault().getPath(ctx.paths.resolve(it.value)),
+          StandardCharsets.UTF_8,
+        )
       } ?: argsList
 
     val argMap = ArgMaps.from(lines)
@@ -148,6 +162,8 @@ class Ksp2Task : Work {
     argMap: ArgMap,
   ): Int {
     val workingDir = taskContext.directory
+    // The arguments name the request's files; the task reads and writes them where they resolve to.
+    val paths = taskContext.paths
     val moduleName = argMap.mandatorySingle(Ksp2Flags.MODULE_NAME)
 
     // Create temporary directories for KSP2 processing
@@ -175,13 +191,13 @@ class Ksp2Task : Work {
       val sourceRoots = mutableSetOf<String>()
       val javaSourceRoots = mutableSetOf<String>()
 
-      // Stage individual source files
+      // Stage individual source files, at the paths the request names
       val sources = argMap.optional(Ksp2Flags.SOURCES) ?: emptyList()
       for (source in sources) {
         val sourceFile = File(source)
         val targetFile = stagedSourcesDir.resolve(source).toFile()
         targetFile.parentFile?.mkdirs()
-        sourceFile.copyTo(targetFile, overwrite = true)
+        File(paths.resolve(source)).copyTo(targetFile, overwrite = true)
 
         // Track source roots (directories containing sources)
         val sourceRoot =
@@ -199,7 +215,7 @@ class Ksp2Task : Work {
       // Unpack srcjars directly
       val srcjars = argMap.optional(Ksp2Flags.SOURCE_JARS) ?: emptyList()
       for (srcjar in srcjars) {
-        ZipFile(srcjar).use { zip ->
+        ZipFile(paths.resolve(srcjar)).use { zip ->
           zip.entries().asSequence().forEach { entry ->
             if (!entry.isDirectory) {
               val targetFile = stagedSourcesDir.resolve(entry.name).toFile()
@@ -227,7 +243,7 @@ class Ksp2Task : Work {
 
       // Create classloader with KSP2 jars and processor jars
       val processorClasspath = argMap.optional(Ksp2Flags.PROCESSOR_CLASSPATH) ?: emptyList()
-      val kspClassLoader = getKspClassLoader(processorClasspath, taskContext.inputDigests)
+      val kspClassLoader = getKspClassLoader(processorClasspath, taskContext.inputDigests, paths)
 
       val processorOptions = parseKspOptions(argMap.optional(Ksp2Flags.KSP_OPTIONS) ?: emptyList())
       val experimentalPsiResolution =
@@ -246,7 +262,8 @@ class Ksp2Task : Work {
           moduleName = moduleName,
           sourceRoots = sourceRoots.map { File(it) },
           javaSourceRoots = javaSourceRoots.map { File(it) },
-          libraries = argMap.optional(Ksp2Flags.LIBRARIES)?.map { File(it) } ?: emptyList(),
+          libraries =
+            argMap.optional(Ksp2Flags.LIBRARIES)?.map { File(paths.resolve(it)) } ?: emptyList(),
           kotlinOutputDir = kotlinOutputDir.toFile(),
           javaOutputDir = javaOutputDir.toFile(),
           classOutputDir = classOutputDir.toFile(),
@@ -257,7 +274,7 @@ class Ksp2Task : Work {
           jvmTarget = argMap.optionalSingle(Ksp2Flags.JVM_TARGET),
           languageVersion = argMap.optionalSingle(Ksp2Flags.LANGUAGE_VERSION),
           apiVersion = argMap.optionalSingle(Ksp2Flags.API_VERSION),
-          jdkHome = argMap.optionalSingle(Ksp2Flags.JDK_HOME)?.let { File(it) },
+          jdkHome = argMap.optionalSingle(Ksp2Flags.JDK_HOME)?.let { File(paths.resolve(it)) },
           processorOptions = processorOptions,
           experimentalPsiResolution = experimentalPsiResolution,
         )
@@ -270,14 +287,14 @@ class Ksp2Task : Work {
       // Package generated sources into srcjar
       val generatedSourcesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_SOURCES_OUTPUT)
       packageDirectoriesToJar(
-        outputPath = generatedSourcesOutput,
+        outputPath = paths.resolve(generatedSourcesOutput),
         directories = listOf(kotlinOutputDir, javaOutputDir),
       )
 
       // Package generated classes/resources into jar
       val generatedClassesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_CLASSES_OUTPUT)
       packageDirectoriesToJar(
-        outputPath = generatedClassesOutput,
+        outputPath = paths.resolve(generatedClassesOutput),
         directories = listOf(classOutputDir, resourceOutputDir),
       )
       return 0

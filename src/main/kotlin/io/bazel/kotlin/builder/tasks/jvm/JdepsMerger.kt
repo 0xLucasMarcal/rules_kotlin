@@ -68,9 +68,10 @@ class JdepsMerger {
       rootBuilder.success = false
       rootBuilder.ruleLabel = label
 
+      // The jdeps name the jars as the request does; the files are read where they resolve to.
       val dependencyMap = sortedMapOf<String, Deps.Dependency>()
       inputs.forEach { input ->
-        BufferedInputStream(Paths.get(input).toFile().inputStream()).use {
+        BufferedInputStream(Paths.get(ctx.paths.resolve(input)).toFile().inputStream()).use {
           val deps: Deps.Dependencies = Deps.Dependencies.parseFrom(it)
           deps.getDependencyList().forEach {
             val dependency = dependencyMap.get(it.path)
@@ -86,7 +87,7 @@ class JdepsMerger {
 
       rootBuilder.success = true
 
-      BufferedOutputStream(File(output).outputStream()).use {
+      BufferedOutputStream(File(ctx.paths.resolve(output)).outputStream()).use {
         it.write(rootBuilder.build().toByteArray())
       }
 
@@ -97,7 +98,7 @@ class JdepsMerger {
         // so we need to make sure wedon't mart the dependency as unused
         // unless all of the jars are unused.
         dependencyMap.values.forEach {
-          var label = readJarOwnerFromManifest(Paths.get(it.path)).label
+          var label = readJarOwnerFromManifest(Paths.get(ctx.paths.resolve(it.path))).label
           if (label != null) {
             if (label.startsWith("@@") || label.startsWith("@/")) {
               label = label.substring(1)
@@ -140,11 +141,17 @@ class JdepsMerger {
     val aspect: String? = null,
   )
 
-  private fun getArgs(args: List<String>): ArgMap {
+  private fun getArgs(
+    ctx: WorkerContext.TaskContext,
+    args: List<String>,
+  ): ArgMap {
     check(args.isNotEmpty()) { "expected at least a single arg got: ${args.joinToString(" ")}" }
     val lines =
       FLAGFILE_RE.matchEntire(args[0])?.groups?.get(1)?.let {
-        Files.readAllLines(FileSystems.getDefault().getPath(it.value), StandardCharsets.UTF_8)
+        Files.readAllLines(
+          FileSystems.getDefault().getPath(ctx.paths.resolve(it.value)),
+          StandardCharsets.UTF_8,
+        )
       } ?: args
 
     return ArgMaps.from(lines)
@@ -154,7 +161,7 @@ class JdepsMerger {
     ctx: WorkerContext.TaskContext,
     args: List<String>,
   ): Int {
-    val argMap = getArgs(args)
+    val argMap = getArgs(ctx, args)
     val inputs = argMap.mandatory(JdepsMergerFlags.INPUTS)
     val output = argMap.mandatorySingle(JdepsMergerFlags.OUTPUT)
     val label = argMap.mandatorySingle(JdepsMergerFlags.TARGET_LABEL)

@@ -31,3 +31,34 @@ bazel_integration_test(
     ],
     test_runner = ":toolchain_loading_test_runner",
 )
+
+kt_jvm_test(
+    name = "multiplex_sandboxing_test_runner",
+    srcs = ["MultiplexSandboxingTest.kt"],
+    # Run through bazel_integration_test, which supplies the Bazel launcher.
+    tags = ["manual"],
+    test_class = "io.bazel.kotlin.integration.MultiplexSandboxingTest",
+    deps = [
+        "//src/main/kotlin/io/bazel/kotlin/test:test_base",
+        "//src/main/protobuf:deps_java_proto",
+        "@com_google_protobuf//:protobuf_java",
+        "@kotlin_rules_maven_test//:junit_junit",
+    ],
+)
+
+bazel_integration_test(
+    name = "multiplex_sandboxing_test",
+    # Each test builds the consumer, from scratch for the first.
+    timeout = "eternal",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = ["//:rules_kotlin_release"],
+    env = {
+        "RULES_KOTLIN_RELEASE": "$(rlocationpath //:rules_kotlin_release)",
+    },
+    tags = [
+        "no-remote",
+        "requires-network",
+    ],
+    test_runner = ":multiplex_sandboxing_test_runner",
+)
