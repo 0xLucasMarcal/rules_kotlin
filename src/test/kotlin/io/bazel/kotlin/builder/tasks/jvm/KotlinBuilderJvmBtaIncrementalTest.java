@@ -33,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -345,6 +346,43 @@ public class KotlinBuilderJvmBtaIncrementalTest {
         assertThat(dependencies(dep, Dependency.Kind.UNUSED)).isEmpty();
     }
 
+    /** The dependency's jar under another path, with the same contents. */
+    private static Dep movedDependency(Dep dependency) {
+        try {
+            Path jar = Paths.get(dependency.singleCompileJar());
+            Path moved = Files.createTempDirectory("moved").resolve(jar.getFileName());
+            Files.copy(jar, moved);
+            return Dep.builder()
+                    .label(dependency.label())
+                    .moduleName(dependency.moduleName())
+                    .compileJars(Collections.singletonList(moved.toString()))
+                    .build();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    @Test
+    public void testSourcesUsingAMovedDependencyRecordItsNewPath() {
+        Dep dependency = compileDependency();
+        Map<String, String[]> sources = new LinkedHashMap<>();
+        sources.put("A.kt", A);
+        sources.put("UsesDependency.kt", new String[] {"package ic", "fun use() = dep.Dependency()"});
+        compileWithDependencies(true, sources, dependency);
+
+        // The compiler sees no change: the moved jar has the same contents.
+        Dep moved = movedDependency(dependency);
+        Dep dep = ctx.rerunCompileTask(c -> {
+            c.removeDependencies(dependency);
+            c.addDirectDependencies(moved);
+        });
+
+        assertThat(compiledFromScratch()).isFalse();
+        assertThat(compiledSources()).containsExactly("UsesDependency.kt");
+        assertThat(explicitDependencies(dep)).contains(moved.singleCompileJar());
+        assertThat(explicitDependencies(dep)).doesNotContain(dependency.singleCompileJar());
+    }
+
     @Test
     public void testDependencyThatIsNoLongerDirectFailsStrictDeps() {
         Dep dependency = compileDependency();
@@ -367,8 +405,9 @@ public class KotlinBuilderJvmBtaIncrementalTest {
                     c.updateSource("A.kt", "package ic", "fun a(): Int = 5");
                 }),
                 lines -> {
-                    assertThat(lines)
-                            .contains("|  a direct dependency was removed, compiling from scratch");
+                    // The check covers the dependencies of UsesDependency.kt, which is not recompiled.
+                    assertThat(compiledFromScratch()).isFalse();
+                    assertThat(compiledSources()).containsExactly("A.kt");
                     assertThat(
                                     lines.stream()
                                             .anyMatch(l -> l.contains(

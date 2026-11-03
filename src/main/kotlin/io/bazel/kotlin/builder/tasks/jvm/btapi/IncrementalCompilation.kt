@@ -20,6 +20,7 @@ import io.bazel.kotlin.builder.tasks.BtapiRuntime
 import io.bazel.kotlin.builder.toolchain.CompilationStatusException
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.builder.utils.fingerprintOf
+import io.bazel.kotlin.builder.utils.jars.SourceDependencies
 import io.bazel.kotlin.builder.utils.jars.SourceDependenciesFile
 import io.bazel.kotlin.compiler.CompilerPluginSpec
 import io.bazel.kotlin.compiler.IncrementalCompilationSpec
@@ -47,7 +48,7 @@ import java.util.stream.Collectors
 import kotlin.concurrent.withLock
 
 /** Bumped whenever the layout or the meaning of the persisted state changes. */
-private const val STATE_FORMAT = "2"
+private const val STATE_FORMAT = "3"
 
 /** The exit code of a compilation that failed on errors in the sources. */
 private const val COMPILATION_ERROR = 1
@@ -62,9 +63,6 @@ private val SNAPSHOT_RETENTION: Duration = Duration.ofDays(3)
  */
 private val JDEPS_CLASSPATH_OPTIONS = setOf("full_classpath")
 
-/** The strict deps levels that check the dependencies of the sources. */
-private val STRICT_DEPS_CHECKED = setOf("warn", "error")
-
 /**
  * Snapshot-based incremental compilation for the Build Tools API path.
  *
@@ -73,9 +71,8 @@ private val STRICT_DEPS_CHECKED = setOf("warn", "error")
  * that state per target under [root], outside of the action's directories, compiles into it, and
  * copies the results into the action's outputs. The state of a target is only reused while the
  * compilation's configuration (compiler flags and plugins, the friend paths, the requested
- * outputs) is unchanged and, under strict deps, no direct dependency was removed; any such change,
- * an interrupted compilation, or a failure the incremental compiler could not roll back starts
- * over with a full compilation.
+ * outputs) is unchanged; any such change, an interrupted compilation, or a failure the incremental
+ * compiler could not roll back starts over with a full compilation.
  *
  * File contents are identified by the digests Bazel sends with each work request, computed with
  * the build's `--digest_function`, so incremental compilation needs the persistent worker
@@ -134,7 +131,6 @@ class IncrementalCompilation(
     val fingerprint: String,
     /** stable source path -> content digest */
     val sources: Map<String, String>,
-    val directDependencies: Set<String>,
   )
 
   /** The state directory of one target. */
@@ -279,17 +275,10 @@ class IncrementalCompilation(
       runtime.classpathFingerprint.ifEmpty { fingerprintOf(runtime.apiImplClasspath, digests) }
     val pluginSpecs = plugins(PluginOutputs(state.abiRound.toString()))
     val fingerprint = fingerprint(task, runtimeKey, pluginSpecs, requestRoot, digests)
-    val directDependencies = task.inputs.directDependenciesList.toSet()
 
     val interrupted = Files.exists(state.inProgress)
     var previous = if (interrupted) null else readPreviousCompilation(state, task)
-    // The sources the compiler does not recompile keep the jars of their last record. A jar that
-    // moved with the same contents is no change to the compiler, but its old path would be a
-    // strict deps violation: a dependency that is no longer direct records every source again.
-    val removedDirectDependency =
-      task.info.strictKotlinDeps in STRICT_DEPS_CHECKED &&
-        previous?.directDependencies?.all(directDependencies::contains) == false
-    if (previous?.fingerprint != fingerprint || removedDirectDependency) {
+    if (previous?.fingerprint != fingerprint) {
       context.whenTracing {
         printLines(
           "incremental compilation",
@@ -297,7 +286,6 @@ class IncrementalCompilation(
             when {
               interrupted -> "the previous compilation did not complete"
               previous == null -> "no previous compilation state"
-              removedDirectDependency -> "a direct dependency was removed"
               else -> "the compilation configuration changed"
             } + ", compiling from scratch",
           ),
@@ -308,7 +296,13 @@ class IncrementalCompilation(
     }
 
     val sources = stageSources(task, requestRoot, state, digests)
-    val modified = sources.filter { (path, digest) -> previous?.sources?.get(path) != digest }.keys
+    val changed = sources.filter { (path, digest) -> previous?.sources?.get(path) != digest }.keys
+    val kept = keptSourceDependencies(task, state, sources.keys, previous != null)
+    val stale = staleSourceDependencies(task, kept)
+    // A stale record of no source in particular is recorded again by recompiling every source.
+    val sourceByPath = sources.keys.associateBy(::canonicalPath)
+    val recordAgain = stale.map { if (it.isEmpty()) null else sourceByPath[canonicalPath(it)] }
+    val modified = if (null in recordAgain) sources.keys else changed + recordAgain.filterNotNull()
     val removed = previous?.sources?.keys?.filterNot(sources::containsKey) ?: emptyList()
     deleteRecursively(state.classpathSnapshots)
     val snapshots =
@@ -323,7 +317,9 @@ class IncrementalCompilation(
           if (previous == null) {
             listOf("source changes unknown")
           } else {
-            modified.map { "modified: $it" } + removed.map { "removed: $it" }
+            changed.map { "modified: $it" } +
+              stale.map { "uses a jar no longer on the classpath: $it" } +
+              removed.map { "removed: $it" }
           },
       )
     }
@@ -333,7 +329,13 @@ class IncrementalCompilation(
     Files.createDirectories(state.abiClasses)
     deleteRecursively(state.abiRound)
     Files.createDirectories(state.abiRound)
-    prepareSourceDependencies(task, state, sourceDependencies, sources.keys, previous != null)
+    if (task.outputs.jdeps.isNotEmpty()) {
+      // The jdeps plugin appends the dependencies of the sources it analyzes, which replace their
+      // earlier ones: it does not run when the compiler recompiles nothing, and analyzes only the
+      // recompiled sources when it does. The state's copy only changes once the compilation
+      // succeeds.
+      SourceDependenciesFile.write(sourceDependencies, kept - stale)
+    }
     Files.write(state.inProgress, ByteArray(0))
 
     val classesBefore = stamps(state.classes)
@@ -382,10 +384,7 @@ class IncrementalCompilation(
         SourceDependenciesFile.read(sourceDependencies),
       )
     }
-    writePreviousCompilation(
-      state,
-      PreviousCompilation(fingerprint, sources, directDependencies),
-    )
+    writePreviousCompilation(state, PreviousCompilation(fingerprint, sources))
     Files.delete(state.inProgress)
     return output
   }
@@ -473,34 +472,39 @@ class IncrementalCompilation(
   }
 
   /**
-   * Starts [sourceDependencies] with the dependencies of the sources of the last successful
-   * compilation the target still has, or with none without a previous compilation. The jdeps
-   * plugin appends the dependencies of the sources it analyzes, which replace their earlier ones:
-   * it does not run when the compiler recompiles nothing, and analyzes only the recompiled sources
-   * when it does. The target's [TargetState.sourceDependencies] only changes once the compilation
-   * succeeds.
+   * The dependencies of the sources of the last successful compilation the target still has: none
+   * without a previous compilation.
    */
-  private fun prepareSourceDependencies(
+  private fun keptSourceDependencies(
     task: JvmCompilationTask,
     state: TargetState,
-    sourceDependencies: Path,
     sources: Set<String>,
     hasPrevious: Boolean,
-  ) {
-    if (task.outputs.jdeps.isEmpty()) {
-      return
+  ): Map<String, SourceDependencies> {
+    if (task.outputs.jdeps.isEmpty() || !hasPrevious) {
+      return emptyMap()
     }
-    val dependencies =
-      if (hasPrevious) {
-        // The compiler reports a source by the path it was given, which may be a link.
-        val current = sources.map(::canonicalPath).toSet()
-        SourceDependenciesFile.read(state.sourceDependencies).filterKeys {
-          it.isEmpty() || canonicalPath(it) in current
-        }
-      } else {
-        emptyMap()
-      }
-    SourceDependenciesFile.write(sourceDependencies, dependencies)
+    // The compiler reports a source by the path it was given, which may be a link.
+    val current = sources.map(::canonicalPath).toSet()
+    return SourceDependenciesFile.read(state.sourceDependencies).filterKeys {
+      it.isEmpty() || canonicalPath(it) in current
+    }
+  }
+
+  /**
+   * The sources whose dependencies list a jar that is no longer on the classpath. The compiler sees
+   * no change in a jar that moved with the same contents, e.g. a dependency that moved to another
+   * package, so the sources using it are not recompiled and would keep the jar's old path.
+   */
+  private fun staleSourceDependencies(
+    task: JvmCompilationTask,
+    dependencies: Map<String, SourceDependencies>,
+  ): Set<String> {
+    val classpath = task.inputs.classpathList.toSet()
+    return dependencies
+      .filterValues { used ->
+        used.explicitJars.any { it !in classpath } || used.implicitJars.any { it !in classpath }
+      }.keys
   }
 
   /**
@@ -617,7 +621,6 @@ class IncrementalCompilation(
       add("language_version", toolchainInfo.common.languageVersion)
       passthroughFlagsList.forEach { add("flag", it) }
       friendPathsList.forEach { add("friend", it) }
-      add("strict_deps", strictKotlinDeps)
       add("reduced_classpath", reducedClasspathMode)
     }
     plugins.forEach { plugin ->
@@ -655,17 +658,15 @@ class IncrementalCompilation(
     }
     var fingerprint: String? = null
     val sources = LinkedHashMap<String, String>()
-    val directDependencies = mutableSetOf<String>()
     for (line in lines.drop(1)) {
       val fields = line.split(" ", limit = 3)
       when (fields[0]) {
         "fingerprint" -> fingerprint = fields[1]
         "source" -> sources[fields[2]] = fields[1]
-        "direct_dependency" -> directDependencies.add(line.substringAfter(' '))
         else -> return null
       }
     }
-    return fingerprint?.let { PreviousCompilation(it, sources, directDependencies) }
+    return fingerprint?.let { PreviousCompilation(it, sources) }
   }
 
   private fun writePreviousCompilation(
@@ -674,8 +675,7 @@ class IncrementalCompilation(
   ) {
     val lines =
       listOf("format $STATE_FORMAT", "fingerprint ${compilation.fingerprint}") +
-        compilation.sources.map { (path, digest) -> "source $digest $path" } +
-        compilation.directDependencies.map { "direct_dependency $it" }
+        compilation.sources.map { (path, digest) -> "source $digest $path" }
     val temporary = Files.createTempFile(state.dir, "state", ".tmp")
     Files.write(temporary, lines, StandardCharsets.UTF_8)
     Files.move(

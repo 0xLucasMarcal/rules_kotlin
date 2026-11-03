@@ -329,10 +329,10 @@ How it works:
 * The jdeps plugin records the dependencies of each source it analyzes, and the worker keeps those
   of the sources it did not recompile. The jdeps of an incremental compilation are the jdeps of a
   full compilation, and strict deps are checked against every source.
+* A source that used a jar no longer on the classpath is recompiled, so that its dependencies are
+  recorded again: the compiler sees no change in a jar that moved with the same contents.
 * Changes to the compilation configuration fall back to a full compile: the compiler options,
-  the compiler plugins and their options, the friend paths, and the requested outputs. So does
-  removing a direct dependency while strict deps are checked: the sources the compiler does not
-  recompile keep the paths of the jars they used, which a dependency that moved would leave stale.
+  the compiler plugins and their options, the friend paths, and the requested outputs.
 * Targets that run kapt, and targets with compiler plugin options that refer to the action's
   directories (`{generatedClasses}`, `{stubs}`, `{temp}`, `{generatedSources}`), compile
   non-incrementally.
