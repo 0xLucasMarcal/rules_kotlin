@@ -70,6 +70,61 @@ class SourceDependenciesTest {
   }
 
   @Test
+  fun `an appended record replaces the source's earlier records and keeps the others`() {
+    val file = Files.createTempDirectory("SourceDependenciesTest").resolve("source_deps")
+    SourceDependenciesFile.write(
+      file,
+      mapOf(
+        "/src/A.kt" to SourceDependencies(setOf("a.jar"), emptySet()),
+        "/src/B.kt" to SourceDependencies(setOf("b.jar"), emptySet()),
+      ),
+    )
+
+    SourceDependenciesFile.append(
+      file,
+      mapOf(
+        "/src/A.kt" to SourceDependencies(emptySet(), emptySet()),
+        "/src/C.kt" to SourceDependencies(setOf("c.jar"), emptySet()),
+      ),
+    )
+
+    assertThat(SourceDependenciesFile.read(file))
+      .containsExactly(
+        "/src/A.kt",
+        SourceDependencies(emptySet(), emptySet()),
+        "/src/B.kt",
+        SourceDependencies(setOf("b.jar"), emptySet()),
+        "/src/C.kt",
+        SourceDependencies(setOf("c.jar"), emptySet()),
+      )
+  }
+
+  @Test
+  fun `rounds append to a missing file, and a source analyzed in consecutive rounds is replaced`() {
+    val file = Files.createTempDirectory("SourceDependenciesTest").resolve("source_deps")
+
+    SourceDependenciesFile.append(
+      file,
+      mapOf(
+        "/src/A.kt" to SourceDependencies(setOf("a.jar"), emptySet()),
+        "/src/B.kt" to SourceDependencies(setOf("b.jar"), setOf("c.jar")),
+      ),
+    )
+    SourceDependenciesFile.append(
+      file,
+      mapOf("/src/B.kt" to SourceDependencies(setOf("d.jar"), emptySet())),
+    )
+
+    assertThat(SourceDependenciesFile.read(file))
+      .containsExactly(
+        "/src/A.kt",
+        SourceDependencies(setOf("a.jar"), emptySet()),
+        "/src/B.kt",
+        SourceDependencies(setOf("d.jar"), emptySet()),
+      )
+  }
+
+  @Test
   fun `a missing per-source file has no sources`() {
     val file = Files.createTempDirectory("SourceDependenciesTest").resolve("missing")
 

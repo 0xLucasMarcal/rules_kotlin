@@ -21,7 +21,6 @@ import io.bazel.kotlin.builder.toolchain.CompilationStatusException
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.builder.utils.fingerprintOf
 import io.bazel.kotlin.builder.utils.jars.SourceDependenciesFile
-import io.bazel.kotlin.builder.utils.jars.jdepsOf
 import io.bazel.kotlin.compiler.CompilerPluginSpec
 import io.bazel.kotlin.compiler.IncrementalCompilationSpec
 import io.bazel.kotlin.compiler.KotlinBtapiCompiler
@@ -48,7 +47,7 @@ import java.util.stream.Collectors
 import kotlin.concurrent.withLock
 
 /** Bumped whenever the layout or the meaning of the persisted state changes. */
-private const val STATE_FORMAT = "1"
+private const val STATE_FORMAT = "2"
 
 /** The exit code of a compilation that failed on errors in the sources. */
 private const val COMPILATION_ERROR = 1
@@ -58,10 +57,10 @@ private val SNAPSHOT_RETENTION: Duration = Duration.ofDays(3)
 
 /**
  * The jdeps plugin options that list the classpath. The state survives their changes: the
- * compiler detects classpath changes from the snapshots, and [IncrementalCompilation] writes the
- * jdeps from the dependencies of each source.
+ * compiler detects classpath changes from the snapshots, and the builder writes the jdeps from the
+ * dependencies of each source.
  */
-private val JDEPS_CLASSPATH_OPTIONS = setOf("direct_dependencies", "full_classpath")
+private val JDEPS_CLASSPATH_OPTIONS = setOf("full_classpath")
 
 /** The strict deps levels that check the dependencies of the sources. */
 private val STRICT_DEPS_CHECKED = setOf("warn", "error")
@@ -111,8 +110,6 @@ class IncrementalCompilation(
   class PluginOutputs(
     /** The directory the ABI plugin writes the ABI classes to. */
     val abiClasses: String,
-    /** The file the jdeps plugin records the dependencies of each source in. */
-    val sourceDependencies: String,
   )
 
   /** What [compile] hands to the compiler invocation. */
@@ -151,7 +148,7 @@ class IncrementalCompilation(
     val abiClasses: Path = dir.resolve("abi_classes")
     val abiRound: Path = dir.resolve("abi_round")
 
-    /** The dependencies of each source, from which the jdeps are written. */
+    /** The dependencies of each source of the last successful compilation. */
     val sourceDependencies: Path = dir.resolve("source_deps")
     val stagedSources: Path = dir.resolve("srcs")
 
@@ -175,6 +172,8 @@ class IncrementalCompilation(
    * (see [unavailability]) and the caller should compile as usual.
    *
    * @param classpath the compile classpath.
+   * @param sourceDependencies the file the jdeps plugin appends the dependencies of the sources it
+   *   analyzes to. Once the compilation completes, it holds the dependencies of every source.
    * @param plugins the compiler plugins, given where they write to.
    * @param invoke runs the compiler and returns its output lines; throws
    *   [CompilationStatusException] when the compilation fails.
@@ -185,6 +184,7 @@ class IncrementalCompilation(
     runtime: BtapiRuntime,
     compiler: KotlinBtapiCompiler,
     classpath: List<String>,
+    sourceDependencies: Path,
     plugins: (PluginOutputs) -> List<CompilerPluginSpec>,
     invoke: (Invocation) -> List<String>,
   ): List<String>? {
@@ -202,7 +202,17 @@ class IncrementalCompilation(
         return null
       }
     return withTargetLock(state) {
-      compileWithState(context, task, runtime, compiler, classpath, plugins, invoke, state)
+      compileWithState(
+        context,
+        task,
+        runtime,
+        compiler,
+        classpath,
+        sourceDependencies,
+        plugins,
+        invoke,
+        state,
+      )
     }
   }
 
@@ -253,6 +263,7 @@ class IncrementalCompilation(
     runtime: BtapiRuntime,
     compiler: KotlinBtapiCompiler,
     classpath: List<String>,
+    sourceDependencies: Path,
     plugins: (PluginOutputs) -> List<CompilerPluginSpec>,
     invoke: (Invocation) -> List<String>,
     state: TargetState,
@@ -266,15 +277,15 @@ class IncrementalCompilation(
         .parent
     val runtimeKey =
       runtime.classpathFingerprint.ifEmpty { fingerprintOf(runtime.apiImplClasspath, digests) }
-    val pluginSpecs =
-      plugins(PluginOutputs(state.abiRound.toString(), state.sourceDependencies.toString()))
+    val pluginSpecs = plugins(PluginOutputs(state.abiRound.toString()))
     val fingerprint = fingerprint(task, runtimeKey, pluginSpecs, requestRoot, digests)
     val directDependencies = task.inputs.directDependenciesList.toSet()
 
     val interrupted = Files.exists(state.inProgress)
     var previous = if (interrupted) null else readPreviousCompilation(state, task)
-    // Strict deps are checked on the recompiled sources only, so a dependency that is no longer
-    // direct must be checked against every source.
+    // The sources the compiler does not recompile keep the jars of their last record. A jar that
+    // moved with the same contents is no change to the compiler, but its old path would be a
+    // strict deps violation: a dependency that is no longer direct records every source again.
     val removedDirectDependency =
       task.info.strictKotlinDeps in STRICT_DEPS_CHECKED &&
         previous?.directDependencies?.all(directDependencies::contains) == false
@@ -322,7 +333,7 @@ class IncrementalCompilation(
     Files.createDirectories(state.abiClasses)
     deleteRecursively(state.abiRound)
     Files.createDirectories(state.abiRound)
-    prepareSourceDependencies(task, state, sources.keys, previous != null)
+    prepareSourceDependencies(task, state, sourceDependencies, sources.keys, previous != null)
     Files.write(state.inProgress, ByteArray(0))
 
     val classesBefore = stamps(state.classes)
@@ -365,7 +376,11 @@ class IncrementalCompilation(
       copyTree(state.abiClasses, Paths.get(task.directories.abiClasses))
     }
     if (task.outputs.jdeps.isNotEmpty()) {
-      writeJdeps(task, state)
+      // The plugin appended a record for each round: keep one per source.
+      SourceDependenciesFile.write(
+        state.sourceDependencies,
+        SourceDependenciesFile.read(sourceDependencies),
+      )
     }
     writePreviousCompilation(
       state,
@@ -458,13 +473,17 @@ class IncrementalCompilation(
   }
 
   /**
-   * The jdeps plugin replaces the dependencies of the sources it analyzes in the target's
-   * [TargetState.sourceDependencies] and keeps the others'. Drops the dependencies of the sources
-   * the target no longer has, or starts over without a previous compilation.
+   * Starts [sourceDependencies] with the dependencies of the sources of the last successful
+   * compilation the target still has, or with none without a previous compilation. The jdeps
+   * plugin appends the dependencies of the sources it analyzes, which replace their earlier ones:
+   * it does not run when the compiler recompiles nothing, and analyzes only the recompiled sources
+   * when it does. The target's [TargetState.sourceDependencies] only changes once the compilation
+   * succeeds.
    */
   private fun prepareSourceDependencies(
     task: JvmCompilationTask,
     state: TargetState,
+    sourceDependencies: Path,
     sources: Set<String>,
     hasPrevious: Boolean,
   ) {
@@ -481,27 +500,7 @@ class IncrementalCompilation(
       } else {
         emptyMap()
       }
-    SourceDependenciesFile.write(state.sourceDependencies, dependencies)
-  }
-
-  /**
-   * Writes the jdeps of every source of the target: the plugin does not run when the compiler
-   * recompiles nothing, and analyzes only the recompiled sources when it does. They are the jdeps
-   * a full compilation writes.
-   */
-  private fun writeJdeps(
-    task: JvmCompilationTask,
-    state: TargetState,
-  ) {
-    val dependencies = SourceDependenciesFile.read(state.sourceDependencies).values
-    val jdeps =
-      jdepsOf(
-        task.info.label,
-        task.inputs.directDependenciesList,
-        dependencies.flatMapTo(LinkedHashSet()) { it.explicitJars },
-        dependencies.flatMapTo(LinkedHashSet()) { it.implicitJars },
-      )
-    Files.newOutputStream(Paths.get(task.outputs.jdeps)).use(jdeps::writeTo)
+    SourceDependenciesFile.write(sourceDependencies, dependencies)
   }
 
   /**

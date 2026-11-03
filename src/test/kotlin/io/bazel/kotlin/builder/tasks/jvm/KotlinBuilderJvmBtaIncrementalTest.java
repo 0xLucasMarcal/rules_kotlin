@@ -369,7 +369,10 @@ public class KotlinBuilderJvmBtaIncrementalTest {
                 lines -> {
                     assertThat(lines)
                             .contains("|  a direct dependency was removed, compiling from scratch");
-                    assertThat(lines.stream().anyMatch(l -> l.contains("Strict Deps Violations")))
+                    assertThat(
+                                    lines.stream()
+                                            .anyMatch(l -> l.contains(
+                                                    "Please add the following dependencies")))
                             .isTrue();
                 });
     }
