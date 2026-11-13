@@ -11,12 +11,18 @@ import org.junit.Test
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 
 /** The worker startup flag that turns incremental compilation on. */
 private const val INCREMENTAL =
   "--worker_extra_flag=KotlinCompile=--experimental_incremental_compilation"
+
+/** The worker startup flag that prints a summary line per compilation. */
+private const val SUMMARY =
+  "--worker_extra_flag=KotlinCompile=--experimental_incremental_compilation_summary"
 
 /**
  * Incremental compilation through a real Bazel: the cache keys of the compile actions, which
@@ -51,17 +57,59 @@ class IncrementalCompilationTest : BazelIntegrationTestBase() {
     }
   }
 
-  private fun runBazel(vararg args: String): ProcessResult =
-    bazel
-      .run(
-        consumer,
-        "--batch",
-        "--ignore_all_rc_files",
-        "--host_jvm_args=-Djava.net.preferIPv6Addresses=system",
-        "--output_user_root=${root.resolve("bazel")}",
-        "--output_base=$output",
-        *args,
-      ).getOrThrow()
+  private fun runBazel(vararg args: String): ProcessResult = tryBazel(*args).getOrThrow()
+
+  private fun tryBazel(vararg args: String): Result<ProcessResult> =
+    bazel.run(
+      consumer,
+      "--batch",
+      "--ignore_all_rc_files",
+      "--host_jvm_args=-Djava.net.preferIPv6Addresses=system",
+      "--output_user_root=${root.resolve("bazel")}",
+      "--output_base=$output",
+      *args,
+    )
+
+  /** The incremental compilation state root of the worker, in the execution root. */
+  private val stateRoot by lazy { output.resolve("execroot/_main/bazel-out/_kotlin_ic") }
+
+  /**
+   * Builds //:lib and kills the worker with SIGKILL once a compilation is in progress, as Bazel
+   * does to a worker it cannot cancel, e.g. when another action fails or a remote execution wins.
+   * Returns the output lines of the build, which fails unless Bazel retries the compilation.
+   */
+  private fun buildKillingTheWorker(vararg flags: String): List<String> {
+    val executor = Executors.newSingleThreadExecutor()
+    try {
+      val build =
+        executor.submit<Result<ProcessResult>> {
+          tryBazel("build", "--noshow_progress", "--color=no", *commonFlags, *flags, "//:lib")
+        }
+      val deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(10)
+      while (!inProgress()) {
+        check(!build.isDone) { "the build ended before a compilation was in progress" }
+        check(System.nanoTime() < deadline) { "no compilation in progress" }
+        Thread.sleep(1)
+      }
+      Files.list(stateRoot.resolve("workers")).use { markers ->
+        markers.forEach { marker ->
+          marker.fileName.toString().substringBefore('-').toLongOrNull()
+            ?.let(ProcessHandle::of)
+            ?.ifPresent { it.destroyForcibly() }
+        }
+      }
+      return build.get().fold(
+        { (it.stdOut + it.stdErr).toString(UTF_8).lines() },
+        { listOf(it.message.orEmpty()) },
+      )
+    } finally {
+      executor.shutdownNow()
+    }
+  }
+
+  private fun inProgress(): Boolean =
+    Files.isDirectory(stateRoot) &&
+      Files.list(stateRoot).use { targets -> targets.anyMatch { Files.exists(it.resolve("in-progress")) } }
 
   private val commonFlags by lazy {
     arrayOf(
@@ -128,11 +176,19 @@ class IncrementalCompilationTest : BazelIntegrationTestBase() {
     assertTrue(text, cached.any { "disk cache hit" in it })
     assertFalse(text, cached.any { it.startsWith("|  state: ") })
 
-    // The first compilation keeps the state, the next one recompiles the changed source only.
+    // With lazy state, the first compilation of the target compiles without state, the second
+    // creates the state, and the third recompiles the changed source only.
     consumer.resolve("A.kt").writeText("package ic\nfun a(): Int = base() + 2\n")
-    build(INCREMENTAL)
+    val first = build(INCREMENTAL)
+    assertTrue(
+      first.joinToString("\n"),
+      first.any { it.endsWith("compiling without state: the next compilation creates it") },
+    )
+    consumer.resolve("A.kt").writeText("package ic\nfun a(): Int = base() + 3\n")
+    val second = build(INCREMENTAL)
+    assertTrue(second.joinToString("\n"), second.any { it == "|  source changes unknown" })
     consumer.resolve("A.kt").writeText("package ic\nfun a(): Int = 3\n")
-    val rebuild = build(INCREMENTAL)
+    val rebuild = build(INCREMENTAL, SUMMARY)
     val modified = rebuild.filter { it.startsWith("|  modified: ") }
     assertEquals(
       rebuild.joinToString("\n"),
@@ -140,6 +196,22 @@ class IncrementalCompilationTest : BazelIntegrationTestBase() {
       modified.map { it.substringAfterLast('/') },
     )
     assertFalse(rebuild.joinToString("\n"), rebuild.any { it.endsWith("compiling from scratch") })
+    assertTrue(
+      rebuild.joinToString("\n"),
+      rebuild.any { it.startsWith("kotlin incremental compilation: incremental") },
+    )
+
+    // A worker killed during a compilation leaves the compilation in progress: the next one
+    // restores the state before it and compiles incrementally.
+    consumer.resolve("B.kt").writeText("package ic\nfun b(): Long = a() + 2L\n")
+    val killed = buildKillingTheWorker(INCREMENTAL)
+    consumer.resolve("B.kt").writeText("package ic\nfun b(): Long = a() + 3L\n")
+    val recovered = killed + build(INCREMENTAL)
+    assertTrue(
+      recovered.joinToString("\n"),
+      recovered.any { it == "|  the previous compilation did not complete, restored the state before it" },
+    )
+    assertFalse(recovered.joinToString("\n"), recovered.any { it.endsWith("compiling from scratch") })
 
     // The outputs, including the jdeps of a source that stopped using a dependency, are the
     // bytes of a full compilation.

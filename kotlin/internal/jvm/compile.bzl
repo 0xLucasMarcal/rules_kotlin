@@ -783,6 +783,10 @@ def _run_kt_builder_action(
 
     args.add("--build_kotlin", build_kotlin)
 
+    # Only tagged targets get the flag, which keeps the other actions' command lines unchanged.
+    if "kt_no_incremental_compilation" in ctx.attr.tags:
+        args.add("--incremental_compilation_opt_out", "true")
+
     progress_message = "%s %%{label} { kt: %d, java: %d, srcjars: %d } for %s" % (
         mnemonic,
         len(srcs.kt),

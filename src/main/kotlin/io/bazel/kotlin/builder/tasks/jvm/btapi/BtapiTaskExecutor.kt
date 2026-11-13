@@ -137,11 +137,15 @@ class BtapiTaskExecutor(
     context.execute("compile classes") {
       preprocessedTask.apply {
         val sourceDependencies = newSourceDependencies(this)
+        var packaged = false
         val outputLines =
           try {
             context.execute("kotlinc") {
               if (compileKotlin) {
-                runKotlinCompiler(context, compiler, btapiRuntime, sourceDependencies)
+                runKotlinCompiler(context, compiler, btapiRuntime, sourceDependencies).let {
+                  packaged = it.packaged
+                  it.output
+                }
               } else {
                 if (outputs.jdeps.isNotEmpty()) {
                   writeJdeps(outputs.jdeps, emptyJdeps(info.label))
@@ -162,15 +166,8 @@ class BtapiTaskExecutor(
           }
         }
 
-        if (outputs.jar.isNotEmpty()) {
-          if (instrumentCoverage) {
-            context.execute("create instrumented jar", ::createCoverageInstrumentedJar)
-          } else {
-            context.execute("create jar", ::createOutputJar)
-          }
-        }
-        if (outputs.abijar.isNotEmpty()) {
-          context.execute("create abi jar", ::createAbiJar)
+        if (!packaged) {
+          packageOutputs(context, Paths.get(directories.classes), Paths.get(directories.abiClasses))
         }
         if (outputs.generatedJavaSrcJar.isNotEmpty()) {
           context.execute("creating KAPT generated Java source jar", ::createGeneratedJavaSrcJar)
@@ -262,6 +259,34 @@ class BtapiTaskExecutor(
   }
 
   /**
+   * Creates the output jars from the compiled classes and ABI classes.
+   *
+   * @param classes the Kotlin classes, in the action's directories or in the incremental state.
+   * @param abiClasses the ABI classes, in the action's directories or in the incremental state.
+   */
+  private fun JvmCompilationTask.packageOutputs(
+    context: CompilationTaskContext,
+    classes: Path,
+    abiClasses: Path,
+  ) {
+    if (outputs.jar.isNotEmpty()) {
+      if (instrumentCoverage) {
+        // The instrumentation rewrites the classes in place: never those of the state.
+        val actionClasses = Paths.get(directories.classes)
+        if (classes != actionClasses) {
+          copyTree(classes, actionClasses)
+        }
+        context.execute("create instrumented jar", ::createCoverageInstrumentedJar)
+      } else {
+        context.execute("create jar") { createOutputJar(classes) }
+      }
+    }
+    if (outputs.abijar.isNotEmpty()) {
+      context.execute("create abi jar") { createAbiJar(abiClasses) }
+    }
+  }
+
+  /**
    * @param sourceDependencies the file the jdeps plugin records the dependencies of each source in.
    */
   private fun JvmCompilationTask.runKotlinCompiler(
@@ -269,46 +294,43 @@ class BtapiTaskExecutor(
     compiler: KotlinBtapiCompiler,
     runtime: BtapiRuntime,
     sourceDependencies: Path,
-  ): List<String> {
-    if (info.incrementalCompilation) {
-      val blocker = incrementalCompilationBlocker()
-      if (blocker == null) {
-        incrementalCompilation
-          .compile(
-            context,
-            this,
-            runtime,
-            compiler,
-            classpath = computeClasspath(),
-            sourceDependencies = sourceDependencies,
-            plugins = { outputs ->
-              compilerPlugins(runtime, outputs.abiClasses, sourceDependencies)
-            },
-          ) { invocation ->
-            invokeMainCompilation(
-              context,
-              compiler,
-              sources = invocation.sources,
-              classpath = computeClasspath(),
-              destination = invocation.destination,
-              descriptors = invocation.plugins,
-              incremental = invocation.incrementalCompilation,
-            )
-          }?.let { return it }
-      } else {
-        context.whenTracing {
-          printLines("incremental compilation skipped", listOf(blocker))
-        }
-      }
+  ): IncrementalCompilation.Result {
+    val plain = {
+      invokeMainCompilation(
+        context,
+        compiler,
+        sources = inputs.javaSourcesList + inputs.kotlinSourcesList,
+        classpath = computeClasspath() + directories.generatedClasses,
+        destination = directories.classes,
+        descriptors = compilerPlugins(runtime, directories.abiClasses, sourceDependencies),
+        incremental = null,
+      )
     }
-    return invokeMainCompilation(
+    if (!info.incrementalCompilation) {
+      return IncrementalCompilation.Result(plain(), packaged = false)
+    }
+    return incrementalCompilation.compile(
       context,
+      this,
+      runtime,
       compiler,
-      sources = inputs.javaSourcesList + inputs.kotlinSourcesList,
-      classpath = computeClasspath() + directories.generatedClasses,
-      destination = directories.classes,
-      descriptors = compilerPlugins(runtime, directories.abiClasses, sourceDependencies),
-      incremental = null,
+      classpath = computeClasspath(),
+      sourceDependencies = sourceDependencies,
+      blocker = incrementalCompilationBlocker(),
+      plugins = { outputs -> compilerPlugins(runtime, outputs.abiClasses, sourceDependencies) },
+      invoke = { invocation ->
+        invokeMainCompilation(
+          context,
+          compiler,
+          sources = invocation.sources,
+          classpath = computeClasspath(),
+          destination = invocation.destination,
+          descriptors = invocation.plugins,
+          incremental = invocation.incrementalCompilation,
+        )
+      },
+      plain = plain,
+      packageOutputs = { classes, abiClasses -> packageOutputs(context, classes, abiClasses) },
     )
   }
 

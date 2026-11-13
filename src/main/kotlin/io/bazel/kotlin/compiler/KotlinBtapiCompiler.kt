@@ -64,8 +64,17 @@ interface IncrementalCompilationSpec {
   /** The classpath entry snapshots (see [KotlinBtapiCompiler.snapshotClasspathEntry]), in classpath order. */
   val classpathSnapshots: List<String>
 
+  /**
+   * Whether [classpathSnapshots] are those of the previous successful compilation, in the same
+   * order: the compiler then does not look for classpath changes.
+   */
+  val classpathUnchanged: Boolean
+
   /** Directories cleaned together with the destination when the compiler falls back to a rebuild. */
   val additionalOutputDirectories: List<String>
+
+  /** Receives the sources the compiler compiled, over all of its rounds, once it completes. */
+  fun compiledSources(sources: List<String>)
 }
 
 /**

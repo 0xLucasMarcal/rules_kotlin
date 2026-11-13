@@ -24,6 +24,7 @@ import io.bazel.kotlin.builder.tasks.jvm.InternalCompilerPlugins;
 import io.bazel.kotlin.builder.tasks.jvm.KotlinJvmTaskExecutor;
 import io.bazel.kotlin.builder.tasks.jvm.btapi.BtapiTaskExecutor;
 import io.bazel.kotlin.builder.tasks.jvm.btapi.IncrementalCompilation;
+import io.bazel.kotlin.builder.tasks.jvm.btapi.IncrementalCompilationOptions;
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext;
 import io.bazel.kotlin.builder.toolchain.KotlinToolchain;
 import io.bazel.kotlin.model.CompilationTaskInfo;
@@ -84,6 +85,10 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
     private static KotlinJvmTaskExecutor jvmTaskExecutor;
     private static BtapiTaskExecutor btapiTaskExecutor;
     private static Path incrementalCompilationRoot;
+    /** Eager by default: the tests of the incremental compiler expect the first compilation to create the state. */
+    private static final IncrementalCompilationOptions EAGER = new IncrementalCompilationOptions(false);
+    private static IncrementalCompilationOptions incrementalCompilationOptions = EAGER;
+    private static volatile IncrementalCompilation.CheckpointListener checkpointListener = (checkpoint, dir) -> {};
     private boolean sendInputDigests = true;
     private static KotlinToolchainInfo.BtapiRuntime btapiRuntime;
 
@@ -142,6 +147,7 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
                 .forEach(source -> digests.put(source, sha256(Paths.get(source))));
         Stream.of(
                         inputs.getClasspathList(),
+                        inputs.getSourceJarsList(),
                         inputs.getCompilerPluginClasspathList(),
                         btapi.getApiImplClasspathList(),
                         btapi.getJvmAbiGenClasspathList(),
@@ -190,7 +196,27 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
      * worker in a new output base.
      */
     public static void restartWorker() {
+        restartWorker(EAGER);
+    }
+
+    /** Starts over as {@link #restartWorker()}, with a worker started with the given options. */
+    public static void restartWorker(IncrementalCompilationOptions options) {
         btapiTaskExecutor = null;
+        incrementalCompilationOptions = options;
+        checkpointListener = (checkpoint, dir) -> {};
+    }
+
+    /** Starts a new worker with the given options, which keeps the state of the current one. */
+    public static void restartWorkerKeepingState(IncrementalCompilationOptions options) {
+        Path root = incrementalCompilationRoot();
+        restartWorker(options);
+        incrementalCompilationRoot = root;
+        btapiTaskExecutor = newBtapiTaskExecutor();
+    }
+
+    /** Observes the points at which the current worker's compilations could be interrupted. */
+    public static void onCheckpoint(IncrementalCompilation.CheckpointListener listener) {
+        checkpointListener = listener;
     }
 
     /** The incremental compilation root of the current worker. */
@@ -216,11 +242,18 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
         if (btapiTaskExecutor == null) {
             incrementalCompilationRoot =
                     Paths.get(System.getenv("TEST_TMPDIR"), "kotlin_ic", UUID.randomUUID().toString());
-            btapiTaskExecutor = new BtapiTaskExecutor(
-                    toolchainForTest().getBtapiClassLoader(),
-                    new IncrementalCompilation(incrementalCompilationRoot));
+            btapiTaskExecutor = newBtapiTaskExecutor();
         }
         return btapiTaskExecutor;
+    }
+
+    private static BtapiTaskExecutor newBtapiTaskExecutor() {
+        return new BtapiTaskExecutor(
+                toolchainForTest().getBtapiClassLoader(),
+                new IncrementalCompilation(
+                        incrementalCompilationRoot,
+                        incrementalCompilationOptions,
+                        (checkpoint, dir) -> checkpointListener.reached(checkpoint, dir)));
     }
 
     /**
@@ -284,6 +317,26 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
                 .filter(p -> !p.isEmpty())
                 .forEach(p -> deleteRecursively(Paths.get(p)));
         return executeTask(KotlinJvmTestBuilder::dispatch, changes);
+    }
+
+    @Override
+    Object saveTask() {
+        return taskBuilder.build();
+    }
+
+    @Override
+    void restoreTask(Object task) {
+        taskBuilder.clear().mergeFrom((JvmCompilationTask) task);
+    }
+
+    /** The class jar of the current task. */
+    public String outputJar() {
+        return taskBuilder.getOutputs().getJar();
+    }
+
+    /** The ABI jar of the current task. */
+    public String outputAbiJar() {
+        return taskBuilder.getOutputs().getAbijar();
     }
 
     private static void dispatch(CompilationTaskContext context, JvmCompilationTask task) {
@@ -390,6 +443,44 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
 
         public TaskBuilder incrementalCompilation() {
             taskBuilder.getInfoBuilder().setIncrementalCompilation(true);
+            return this;
+        }
+
+        /** Opts the target out of incremental compilation, as the kt_no_incremental_compilation tag. */
+        public TaskBuilder incrementalCompilationOptOut() {
+            taskBuilder.getInfoBuilder().setIncrementalCompilationOptOut(true);
+            return this;
+        }
+
+        /**
+         * Writes a source jar of the given sources, by their path in the jar, and adds it to the task;
+         * replaces the content of a source jar added before.
+         */
+        public void sourceJar(String filename, Map<String, String[]> sources) {
+            Path jar = instanceRoot().resolve(filename).toAbsolutePath();
+            try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(Files.newOutputStream(jar))) {
+                for (Map.Entry<String, String[]> source : sources.entrySet()) {
+                    out.putNextEntry(new java.util.zip.ZipEntry(source.getKey()));
+                    out.write(String.join("\n", source.getValue()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.closeEntry();
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            if (!taskBuilder.getInputs().getSourceJarsList().contains(jar.toString())) {
+                taskBuilder.getInputsBuilder().addSourceJars(jar.toString());
+            }
+        }
+
+        /** Writes the class jar under the given directory, e.g. that of a configuration in bazel-out. */
+        public TaskBuilder outputJarIn(String directory) {
+            Path jar = instanceRoot().resolve(directory).resolve("jar_file.jar").toAbsolutePath();
+            try {
+                Files.createDirectories(jar.getParent());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            taskBuilder.getOutputsBuilder().setJar(jar.toString());
             return this;
         }
 

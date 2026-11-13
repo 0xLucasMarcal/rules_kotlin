@@ -32,6 +32,7 @@ import org.jetbrains.kotlin.buildtools.api.arguments.enums.JvmTarget
 import org.jetbrains.kotlin.buildtools.api.getToolchain
 import org.jetbrains.kotlin.buildtools.api.jvm.ClassSnapshotGranularity
 import org.jetbrains.kotlin.buildtools.api.jvm.JvmPlatformToolchain
+import org.jetbrains.kotlin.buildtools.api.jvm.JvmSnapshotBasedIncrementalCompilationConfiguration.Companion.ASSURED_NO_CLASSPATH_SNAPSHOT_CHANGES
 import org.jetbrains.kotlin.buildtools.api.jvm.operations.JvmClasspathSnapshottingOperation
 import org.jetbrains.kotlin.buildtools.api.jvm.operations.JvmCompilationOperation
 import java.io.File
@@ -185,13 +186,15 @@ class BuildToolsAPICompiler(
         )
     }
 
+    val compiled = CompiledSources()
     val result =
       runtime.kotlinToolchains.createBuildSession().use { session ->
         session.executeOperation(
           operationBuilder.build(),
-          logger = createLogger(errStream, verbose = configuration.verbose),
+          logger = createLogger(errStream, verbose = configuration.verbose, compiled),
         )
       }
+    incrementalCompilation?.compiledSources(compiled.sources.toList())
 
     return runtime.exitCodes.getValue(result)
   }
@@ -221,6 +224,8 @@ class BuildToolsAPICompiler(
       this[BaseIncrementalCompilationConfiguration.OUTPUT_DIRS] =
         setOf(destination, Paths.get(spec.workingDirectory)) +
         spec.additionalOutputDirectories.map { Paths.get(it) }
+      this[ASSURED_NO_CLASSPATH_SNAPSHOT_CHANGES] =
+        spec.sourceChangesKnown && spec.classpathUnchanged
     }.build()
 
   override fun snapshotClasspathEntry(
@@ -285,9 +290,28 @@ class BuildToolsAPICompiler(
           BtapiKotlinVersion.entries.joinToString(", ") { it.stringValue },
       )
 
+  /**
+   * Collects the sources of the compile iterations the incremental compiler reports: a
+   * "Compile iteration:" debug message, then one message per source, indented, with the reason it
+   * is compiled after " <- ". The compiler reports them whether debugging is enabled or not.
+   */
+  private class CompiledSources {
+    val sources = linkedSetOf<String>()
+    private var inIteration = false
+
+    fun onDebug(msg: String) {
+      when {
+        msg == "Compile iteration:" -> inIteration = true
+        inIteration && msg.startsWith("  ") -> sources.add(msg.trim().substringBefore(" <- "))
+        else -> inIteration = false
+      }
+    }
+  }
+
   private fun createLogger(
     out: PrintStream,
     verbose: Boolean,
+    compiled: CompiledSources,
   ): KotlinLogger =
     object : KotlinLogger {
       override val isDebugEnabled: Boolean = verbose
@@ -315,6 +339,7 @@ class BuildToolsAPICompiler(
       }
 
       override fun debug(msg: String) {
+        compiled.onDebug(msg)
         if (verbose) {
           out.println(msg)
         }

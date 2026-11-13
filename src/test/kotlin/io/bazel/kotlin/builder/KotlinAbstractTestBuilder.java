@@ -93,6 +93,35 @@ abstract class KotlinAbstractTestBuilder<T extends JvmCompilationTaskOrBuilder> 
         return Objects.requireNonNull(label);
     }
 
+    /** A task to come back to with {@link #restore}, e.g. after compiling other tasks. */
+    public static final class SavedTask {
+        private final String label;
+        private final Path instanceRoot;
+        private final Object task;
+
+        private SavedTask(String label, Path instanceRoot, Object task) {
+            this.label = label;
+            this.instanceRoot = instanceRoot;
+            this.task = task;
+        }
+    }
+
+    /** Saves the current task, which a later {@link #restore} makes current again. */
+    public final SavedTask save() {
+        return new SavedTask(label(), instanceRoot(), saveTask());
+    }
+
+    /** Makes a task saved with {@link #save} current again, with its sources and outputs. */
+    public final void restore(SavedTask saved) {
+        label = saved.label;
+        instanceRoot = saved.instanceRoot;
+        restoreTask(saved.task);
+    }
+
+    abstract Object saveTask();
+
+    abstract void restoreTask(Object task);
+
     final Path instanceRoot() {
         return Objects.requireNonNull(instanceRoot);
     }

@@ -1,15 +1,18 @@
 package io.bazel.kotlin.builder.tasks
 
 import com.google.common.truth.Truth.assertThat
+import io.bazel.kotlin.builder.tasks.jvm.btapi.IncrementalCompilationOptions
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.model.JvmCompilationTask
 import io.bazel.worker.Status
 import io.bazel.worker.WorkerContext
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 
 /** Incremental compilation is a worker startup flag, not a flag of the work requests. */
 @RunWith(JUnit4::class)
@@ -130,5 +133,75 @@ class KotlinBuilderIncrementalCompilationTest {
     assertThat(first).contains("warning: incremental compilation disabled")
     assertThat(first).contains("experimental_build_tools_api=true")
     assertThat(second).doesNotContain("warning: incremental compilation disabled")
+  }
+
+  @Test
+  fun `the opt-out flag reaches the task`() {
+    val root = Files.createTempDirectory("KotlinBuilderIncrementalCompilationTest")
+    WorkerContext.run(named = "test") {
+      doTask("build", sandboxDir = root) { taskContext ->
+        KotlinBuilder(capturingExecutor, incrementalCompilation = true).build(
+          taskContext,
+          args = args(root, buildToolsApi = true) + listOf("--incremental_compilation_opt_out", "true"),
+        )
+        Status.SUCCESS
+      }
+    }
+
+    assertThat(captured.single().info.incrementalCompilationOptOut).isTrue()
+  }
+
+  @Test
+  fun `worker flags without the main flag leave incremental compilation off`() {
+    assertThat(
+      IncrementalCompilationOptions.fromWorkerFlags(
+        listOf("--persistent_worker", "--experimental_incremental_compilation_summary"),
+      ),
+    ).isNull()
+    assertThat(IncrementalCompilationOptions.fromWorkerFlags(listOf("--persistent_worker"))).isNull()
+  }
+
+  @Test
+  fun `worker flags set the incremental compilation options`() {
+    assertThat(
+      IncrementalCompilationOptions.fromWorkerFlags(listOf("--experimental_incremental_compilation")),
+    ).isEqualTo(IncrementalCompilationOptions())
+    assertThat(
+      IncrementalCompilationOptions.fromWorkerFlags(
+        listOf(
+          "--persistent_worker",
+          "--experimental_incremental_compilation",
+          "--experimental_incremental_compilation_state=eager",
+          "--experimental_incremental_compilation_min_sources=5",
+          "--experimental_incremental_compilation_exec_configuration",
+          "--experimental_incremental_compilation_summary=true",
+          "--experimental_incremental_compilation_log",
+          "--experimental_incremental_compilation_retention_days=2",
+        ),
+      ),
+    ).isEqualTo(
+      IncrementalCompilationOptions(
+        lazyState = false,
+        minSources = 5,
+        execConfiguration = true,
+        summary = true,
+        log = true,
+        retention = Duration.ofDays(2),
+      ),
+    )
+  }
+
+  @Test
+  fun `unknown or malformed incremental compilation flags fail the worker`() {
+    listOf(
+      "--experimental_incremental_compilation_stat=lazy",
+      "--experimental_incremental_compilation_state=sometimes",
+      "--experimental_incremental_compilation_min_sources=-1",
+      "--experimental_incremental_compilation_log=maybe",
+    ).forEach { flag ->
+      assertThrows(IllegalArgumentException::class.java) {
+        IncrementalCompilationOptions.fromWorkerFlags(listOf("--experimental_incremental_compilation", flag))
+      }
+    }
   }
 }

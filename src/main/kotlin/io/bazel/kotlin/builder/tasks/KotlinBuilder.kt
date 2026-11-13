@@ -89,6 +89,7 @@ class KotlinBuilder(
       GENERATED_JAVA_STUB_JAR("--kapt_generated_stub_jar"),
       GENERATED_CLASS_JAR("--kapt_generated_class_jar"),
       BUILD_KOTLIN("--build_kotlin"),
+      INCREMENTAL_COMPILATION_OPT_OUT("--incremental_compilation_opt_out"),
       STRICT_KOTLIN_DEPS("--strict_kotlin_deps"),
       REDUCED_CLASSPATH_MODE("--reduced_classpath_mode"),
       INSTRUMENT_COVERAGE("--instrument_coverage"),
@@ -207,6 +208,9 @@ class KotlinBuilder(
         }
       incrementalCompilation =
         this@KotlinBuilder.incrementalCompilation && toolchainInfoBuilder.hasBtapi()
+      argMap.optionalSingle(KotlinBuilderFlags.INCREMENTAL_COMPILATION_OPT_OUT)?.let {
+        incrementalCompilationOptOut = it == "true"
+      }
       this
     }
 
