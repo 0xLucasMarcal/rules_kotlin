@@ -25,6 +25,7 @@ import io.bazel.kotlin.builder.tasks.jvm.KotlinJvmTaskExecutor;
 import io.bazel.kotlin.builder.tasks.jvm.btapi.BtapiTaskExecutor;
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext;
 import io.bazel.kotlin.builder.toolchain.KotlinToolchain;
+import io.bazel.kotlin.compiler.KotlinBtapiCompiler;
 import io.bazel.kotlin.model.CompilationTaskInfo;
 import io.bazel.kotlin.model.JvmCompilationTask;
 import io.bazel.kotlin.model.KotlinToolchainInfo;
@@ -120,6 +121,12 @@ public final class KotlinJvmTestBuilder extends KotlinAbstractTestBuilder<JvmCom
             jvmTaskExecutor = new KotlinJvmTaskExecutor(toolchain, plugins);
         }
         return jvmTaskExecutor;
+    }
+
+    /** The Build Tools API compiler of the test runtime, as the worker loads it. */
+    public static KotlinBtapiCompiler btapiCompiler() {
+        return btapiTaskExecutor()
+                .getCompilerInvoker(btapiRuntimeForTest().getApiImplClasspathList(), "");
     }
 
     private static BtapiTaskExecutor btapiTaskExecutor() {
