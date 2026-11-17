@@ -48,9 +48,19 @@ import java.util.zip.ZipFile
  * 3. Runs KSP2 via the cached Ksp2Invoker
  * 4. Packages generated sources/classes into output JARs
  *
+ * With [incrementalOptions], a persistent worker keeps each target's staged sources and KSP's caches
+ * and outputs between requests, and KSP processes only what changed; see
+ * [Ksp2IncrementalProcessing].
+ *
  * This is a separate command from the main Build command for cleaner separation.
  */
-class Ksp2Task : Work {
+class Ksp2Task(
+  incrementalOptions: Ksp2IncrementalOptions? = null,
+  incrementalRoot: Path = Ksp2IncrementalProcessing.DEFAULT_ROOT,
+) : Work {
+  private val incremental =
+    incrementalOptions?.let { Ksp2IncrementalProcessing(incrementalRoot, it) }
+
   companion object {
     private val FLAGFILE_RE = Pattern.compile("""^--flagfile=((.*)-(\d+).params)$""").toRegex()
 
@@ -147,8 +157,107 @@ class Ksp2Task : Work {
     taskContext: WorkerContext.TaskContext,
     argMap: ArgMap,
   ): Int {
-    val workingDir = taskContext.directory
     val moduleName = argMap.mandatorySingle(Ksp2Flags.MODULE_NAME)
+    val sources = argMap.optional(Ksp2Flags.SOURCES) ?: emptyList()
+    val srcjars = argMap.optional(Ksp2Flags.SOURCE_JARS) ?: emptyList()
+    val libraries = argMap.optional(Ksp2Flags.LIBRARIES) ?: emptyList()
+    val processorClasspath = argMap.optional(Ksp2Flags.PROCESSOR_CLASSPATH) ?: emptyList()
+    val processorOptions = parseKspOptions(argMap.optional(Ksp2Flags.KSP_OPTIONS) ?: emptyList())
+    val experimentalPsiResolution =
+      argMap.optionalSingle(Ksp2Flags.EXPERIMENTAL_PSI_RESOLUTION)?.toBoolean() ?: false
+    val generatedSourcesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_SOURCES_OUTPUT)
+    val generatedClassesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_CLASSES_OUTPUT)
+
+    fun runKsp(
+      directories: Ksp2IncrementalProcessing.Directories,
+      changes: Ksp2IncrementalProcessing.Changes?,
+    ): Int {
+      val kspClassLoader = getKspClassLoader(processorClasspath, taskContext.inputDigests)
+      // Load Ksp2Invoker via reflection (it's compiled against KSP2 classes)
+      val invoker =
+        kspClassLoader
+          .loadClass("io.bazel.kotlin.ksp2.Ksp2Invoker")
+          .getDeclaredConstructor()
+          .newInstance() as Ksp2EntryPoint
+      val code =
+        invoker.execute(
+          moduleName = moduleName,
+          sourceRoots = directories.sourceRoots,
+          javaSourceRoots = directories.javaSourceRoots,
+          libraries = libraries.map { File(it) },
+          kotlinOutputDir = directories.kotlinOutput.toFile(),
+          javaOutputDir = directories.javaOutput.toFile(),
+          classOutputDir = directories.classOutput.toFile(),
+          resourceOutputDir = directories.resourceOutput.toFile(),
+          cachesDir = directories.caches.toFile(),
+          projectBaseDir = directories.base.toFile(),
+          outputBaseDir = directories.base.toFile(),
+          jvmTarget = argMap.optionalSingle(Ksp2Flags.JVM_TARGET),
+          languageVersion = argMap.optionalSingle(Ksp2Flags.LANGUAGE_VERSION),
+          apiVersion = argMap.optionalSingle(Ksp2Flags.API_VERSION),
+          jdkHome = argMap.optionalSingle(Ksp2Flags.JDK_HOME)?.let { File(it) },
+          processorOptions = processorOptions,
+          experimentalPsiResolution = experimentalPsiResolution,
+          incremental = changes != null,
+          incrementalLog = changes != null && incremental?.options?.kspLog == true,
+          modifiedSources = changes?.modified.orEmpty(),
+          removedSources = changes?.removed.orEmpty(),
+          changedClasses = changes?.changedClasses.orEmpty(),
+        )
+      if (code != 0) {
+        taskContext.error { "KSP2 failed with exit code: $code" }
+      }
+      return code
+    }
+
+    fun packageOutputs(directories: Ksp2IncrementalProcessing.Directories) {
+      packageDirectoriesToJar(
+        outputPath = generatedSourcesOutput,
+        directories = listOf(directories.kotlinOutput, directories.javaOutput),
+      )
+      packageDirectoriesToJar(
+        outputPath = generatedClassesOutput,
+        directories = listOf(directories.classOutput, directories.resourceOutput),
+      )
+    }
+
+    if (incremental != null && taskContext.inputDigests.isNotEmpty()) {
+      val request =
+        Ksp2IncrementalProcessing.Request(
+          moduleName = moduleName,
+          sources = sources,
+          sourceJars = srcjars,
+          libraries = libraries,
+          outputs = listOf(generatedSourcesOutput, generatedClassesOutput),
+          configuration =
+            listOf("processor_classpath") +
+              processorClasspath.map { "$it\t${taskContext.inputDigests[it].orEmpty()}" } +
+              listOf("options") +
+              processorOptions.toSortedMap().map { (key, value) -> "$key=$value" } +
+              listOf(
+                "jvm_target=${argMap.optionalSingle(Ksp2Flags.JVM_TARGET)}",
+                "language_version=${argMap.optionalSingle(Ksp2Flags.LANGUAGE_VERSION)}",
+                "api_version=${argMap.optionalSingle(Ksp2Flags.API_VERSION)}",
+                "jdk_home=${argMap.optionalSingle(Ksp2Flags.JDK_HOME)}",
+                "psi_resolution=$experimentalPsiResolution",
+              ),
+          inputDigests = taskContext.inputDigests,
+        )
+      try {
+        incremental
+          .process(
+            request,
+            taskContext.asPrintStream(),
+            invoke = ::runKsp,
+            packageOutputs = ::packageOutputs,
+          )?.let { return it }
+      } catch (e: Exception) {
+        taskContext.error(e) { "KSP2 execution failed" }
+        return 1
+      }
+    }
+
+    val workingDir = taskContext.directory
 
     // Create temporary directories for KSP2 processing
     val kspWorkDir = workingDir.resolve("_ksp2").resolve(moduleName)
@@ -176,7 +285,6 @@ class Ksp2Task : Work {
       val javaSourceRoots = mutableSetOf<String>()
 
       // Stage individual source files
-      val sources = argMap.optional(Ksp2Flags.SOURCES) ?: emptyList()
       for (source in sources) {
         val sourceFile = File(source)
         val targetFile = stagedSourcesDir.resolve(source).toFile()
@@ -197,7 +305,6 @@ class Ksp2Task : Work {
       }
 
       // Unpack srcjars directly
-      val srcjars = argMap.optional(Ksp2Flags.SOURCE_JARS) ?: emptyList()
       for (srcjar in srcjars) {
         ZipFile(srcjar).use { zip ->
           zip.entries().asSequence().forEach { entry ->
@@ -225,61 +332,22 @@ class Ksp2Task : Work {
         sourceRoots.add(stagedSourcesDir.toString())
       }
 
-      // Create classloader with KSP2 jars and processor jars
-      val processorClasspath = argMap.optional(Ksp2Flags.PROCESSOR_CLASSPATH) ?: emptyList()
-      val kspClassLoader = getKspClassLoader(processorClasspath, taskContext.inputDigests)
-
-      val processorOptions = parseKspOptions(argMap.optional(Ksp2Flags.KSP_OPTIONS) ?: emptyList())
-      val experimentalPsiResolution =
-        argMap.optionalSingle(Ksp2Flags.EXPERIMENTAL_PSI_RESOLUTION)?.toBoolean() ?: false
-
-      // Load Ksp2Invoker via reflection (it's compiled against KSP2 classes)
-      val invoker =
-        kspClassLoader
-          .loadClass("io.bazel.kotlin.ksp2.Ksp2Invoker")
-          .getDeclaredConstructor()
-          .newInstance() as Ksp2EntryPoint
-
-      // Execute KSP2
-      val code =
-        invoker.execute(
-          moduleName = moduleName,
+      val directories =
+        Ksp2IncrementalProcessing.Directories(
+          base = kspWorkDir,
           sourceRoots = sourceRoots.map { File(it) },
           javaSourceRoots = javaSourceRoots.map { File(it) },
-          libraries = argMap.optional(Ksp2Flags.LIBRARIES)?.map { File(it) } ?: emptyList(),
-          kotlinOutputDir = kotlinOutputDir.toFile(),
-          javaOutputDir = javaOutputDir.toFile(),
-          classOutputDir = classOutputDir.toFile(),
-          resourceOutputDir = resourceOutputDir.toFile(),
-          cachesDir = cachesDir.toFile(),
-          projectBaseDir = kspWorkDir.toFile(),
-          outputBaseDir = kspWorkDir.toFile(),
-          jvmTarget = argMap.optionalSingle(Ksp2Flags.JVM_TARGET),
-          languageVersion = argMap.optionalSingle(Ksp2Flags.LANGUAGE_VERSION),
-          apiVersion = argMap.optionalSingle(Ksp2Flags.API_VERSION),
-          jdkHome = argMap.optionalSingle(Ksp2Flags.JDK_HOME)?.let { File(it) },
-          processorOptions = processorOptions,
-          experimentalPsiResolution = experimentalPsiResolution,
+          kotlinOutput = kotlinOutputDir,
+          javaOutput = javaOutputDir,
+          classOutput = classOutputDir,
+          resourceOutput = resourceOutputDir,
+          caches = cachesDir,
         )
-
+      val code = runKsp(directories, changes = null)
       if (code != 0) {
-        taskContext.error { "KSP2 failed with exit code: $code" }
         return code
       }
-
-      // Package generated sources into srcjar
-      val generatedSourcesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_SOURCES_OUTPUT)
-      packageDirectoriesToJar(
-        outputPath = generatedSourcesOutput,
-        directories = listOf(kotlinOutputDir, javaOutputDir),
-      )
-
-      // Package generated classes/resources into jar
-      val generatedClassesOutput = argMap.mandatorySingle(Ksp2Flags.GENERATED_CLASSES_OUTPUT)
-      packageDirectoriesToJar(
-        outputPath = generatedClassesOutput,
-        directories = listOf(classOutputDir, resourceOutputDir),
-      )
+      packageOutputs(directories)
       return 0
     } catch (e: Exception) {
       taskContext.error(e) { "KSP2 execution failed" }

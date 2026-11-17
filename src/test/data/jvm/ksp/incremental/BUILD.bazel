@@ -1,0 +1,32 @@
+load("//kotlin:jvm.bzl", "kt_jvm_library")
+
+package(default_visibility = ["//src/test:__subpackages__"])
+
+# The processor of Ksp2IncrementalTest; the test loads it in the KSP2 classloader.
+kt_jvm_library(
+    name = "probe_processor",
+    srcs = ["ProbeProcessor.kt"],
+    resource_strip_prefix = "src/test/data/jvm/ksp/incremental/resources",
+    resources = glob(["resources/**"]),
+    deps = ["//kotlin/compiler:symbol-processing-api"],
+)
+
+# Two versions of a library, which Ksp2IncrementalTest swaps on the classpath: only lib.Base
+# differs between them.
+kt_jvm_library(
+    name = "probe_lib_v1",
+    module_name = "probe_lib",
+    srcs = [
+        "lib/Probe.kt",
+        "lib/v1/Base.kt",
+    ],
+)
+
+kt_jvm_library(
+    name = "probe_lib_v2",
+    module_name = "probe_lib",
+    srcs = [
+        "lib/Probe.kt",
+        "lib/v2/Base.kt",
+    ],
+)

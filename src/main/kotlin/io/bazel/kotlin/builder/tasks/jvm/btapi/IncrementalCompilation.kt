@@ -27,6 +27,7 @@ import io.bazel.kotlin.builder.tasks.jvm.btapi.CompilationSummary.Companion.STAG
 import io.bazel.kotlin.builder.tasks.jvm.btapi.CompilationSummary.Mode
 import io.bazel.kotlin.builder.toolchain.CompilationStatusException
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
+import io.bazel.kotlin.builder.utils.bazelRuleKind
 import io.bazel.kotlin.builder.utils.fingerprintOf
 import io.bazel.kotlin.builder.utils.jars.SourceDependencies
 import io.bazel.kotlin.builder.utils.jars.SourceDependenciesFile
@@ -285,6 +286,9 @@ class IncrementalCompilation
 
       /** Snapshots of the classpath entries the request has no digest for, recomputed each time. */
       val classpathSnapshots: Path = dir.resolve("classpath-snapshots")
+
+      /** Copies of the last output jars, with what they were created from, see [packageOutputs]. */
+      val jars: Path = dir.resolve("jars")
 
       companion object {
         const val LOCK_FILE = ".lock"
@@ -556,8 +560,120 @@ class IncrementalCompilation
           abandon(context, state, e)
           throw e
         }
-      summary.time(OUTPUTS) { packageOutputs(state.classes, state.abiClasses) }
+      summary.time(OUTPUTS) { packageOutputs(task, state, summary, packageOutputs) }
       return Result(output, packaged = true)
+    }
+
+    /**
+     * Creates the output jars from the state's classes, or copies the jars an earlier compilation
+     * created from the same classes. A compilation that recompiles nothing, e.g. after an ABI change
+     * of a dependency the target does not use, leaves the classes, and so the jars, as they were.
+     */
+    private fun packageOutputs(
+      task: JvmCompilationTask,
+      state: TargetState,
+      summary: CompilationSummary,
+      packageOutputs: (classes: Path, abiClasses: Path) -> Unit,
+    ) {
+      val outputs =
+        listOf(task.outputs.jar to JAR, task.outputs.abijar to ABI_JAR)
+          .filter { (output, _) -> output.isNotEmpty() }
+          .map { (output, name) -> Paths.get(output) to state.jars.resolve(name) }
+      // Coverage instruments a copy of the classes, which the state's classes do not identify.
+      val key = if (task.instrumentCoverage || outputs.isEmpty()) null else jarsKey(task, state)
+      val keyFile = state.jars.resolve(JARS_KEY)
+      val cachedKey =
+        try {
+          Files.readAllLines(keyFile, StandardCharsets.UTF_8).firstOrNull()
+        } catch (_: IOException) {
+          null
+        }
+      if (key != null && key == cachedKey && outputs.all { (_, jar) -> Files.isRegularFile(jar) }) {
+        outputs.forEach { (output, jar) ->
+          Files.copy(jar, output, StandardCopyOption.REPLACE_EXISTING)
+        }
+        summary.jarsReused = true
+        return
+      }
+      packageOutputs(state.classes, state.abiClasses)
+      summary.jarsReused = false
+      if (key == null) {
+        return
+      }
+      // The key last: a copy that does not complete is never taken for the jars of the key.
+      Files.deleteIfExists(keyFile)
+      Files.createDirectories(state.jars)
+      outputs.forEach { (output, jar) ->
+        Files.copy(output, jar, StandardCopyOption.REPLACE_EXISTING)
+      }
+      writeLines(keyFile, listOf(key))
+    }
+
+    /**
+     * Identifies the content of the output jars: the owner they record, the files of the state's
+     * classes by stamp (the compiler writes a new file for each version, see [begin]), and the files
+     * of the action's own directories the jars include, by content. Null when a class file has no
+     * file key, which leaves its stamp ambiguous.
+     */
+    private fun jarsKey(
+      task: JvmCompilationTask,
+      state: TargetState,
+    ): String? {
+      val lines = mutableListOf<String>()
+      for ((name, dir) in listOf("classes" to state.classes, "abi_classes" to state.abiClasses)) {
+        if (!Files.isDirectory(dir)) {
+          lines.add("$name none")
+          continue
+        }
+        Files.walk(dir).use { paths ->
+          for (path in paths) {
+            val relative = dir.relativize(path).toString()
+            val attributes =
+              Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (attributes.isDirectory) {
+              lines.add("$name dir $relative")
+            } else {
+              val stamp = FileStamp.of(attributes)
+              val fileKey = stamp.key ?: return null
+              lines.add("$name file $relative ${stamp.size} ${stamp.modified.toInstant()} $fileKey")
+            }
+          }
+        }
+      }
+      val actionDirectories =
+        listOf(
+          "java_classes" to task.directories.javaClasses,
+          "generated_classes" to task.directories.generatedClasses,
+        )
+      for ((name, directory) in actionDirectories) {
+        val dir = Paths.get(directory)
+        if (directory.isEmpty() || !Files.isDirectory(dir)) {
+          lines.add("$name none")
+          continue
+        }
+        Files.walk(dir).use { paths ->
+          for (path in paths) {
+            val relative = dir.relativize(path).toString()
+            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+              lines.add("$name dir $relative")
+            } else {
+              lines.add("$name file $relative ${sha256(Files.readAllBytes(path))}")
+            }
+          }
+        }
+      }
+      lines.sort()
+      return sha256(
+        (
+          listOf(
+            "format $STATE_FORMAT",
+            "label ${task.info.label}",
+            "kind ${task.info.bazelRuleKind}",
+            "jar ${task.outputs.jar.isNotEmpty()}",
+            "abi_jar ${task.outputs.abijar.isNotEmpty()}",
+          ) + lines
+        ).joinToString("\n"),
+      )
     }
 
     /**
@@ -703,25 +819,33 @@ class IncrementalCompilation
      * outputs as well (BACKUP_CLASSES), moves an existing output away before writing it again, so a
      * link keeps the content of the file it was made from. The caches are updated in place, and
      * copied.
+     *
+     * The linked trees outlive the compilation ([commit] keeps them), and the next backup only links
+     * the files that changed since: a link that is the same file as the state's is a backup of it.
+     * Linking every class file again cost more than the rest of an incremental compilation that
+     * recompiles nothing.
      */
     private fun begin(state: TargetState): Map<String, FileStamp> {
-      discard(state.backup)
       Files.createDirectories(state.backup)
+      entries(state.backup)
+        .filterNot { it.fileName.toString() in LINKED_TREES }
+        .forEach(::discard)
       var classes = emptyMap<String, FileStamp>()
       val saved = mutableListOf<String>()
       for (component in Component.values()) {
         val path = state.dir.resolve(component.fileName)
+        val copy = state.backup.resolve(component.fileName)
         if (!Files.exists(path)) {
+          discard(copy)
           continue
         }
-        val copy = state.backup.resolve(component.fileName)
         when (component.backup) {
           Backup.LINKED_FILE -> {
             linkOrCopy(path, copy)
           }
 
           Backup.LINKED_TREE -> {
-            linkTree(path, copy).also { if (component == Component.CLASSES) classes = it }
+            syncLinkedTree(path, copy).also { if (component == Component.CLASSES) classes = it }
           }
 
           Backup.COPIED_TREE -> {
@@ -734,10 +858,17 @@ class IncrementalCompilation
       return classes
     }
 
-    /** Completes a compilation begun with [begin], once its record is written. */
+    /**
+     * Completes a compilation begun with [begin], once its record is written. The linked trees of the
+     * backup stay for the next compilation's [begin].
+     */
     private fun commit(state: TargetState) {
       Files.delete(state.inProgress)
-      runCatching { discard(state.backup) }
+      runCatching {
+        entries(state.backup)
+          .filterNot { it.fileName.toString() in LINKED_TREES }
+          .forEach(::discard)
+      }
     }
 
     /**
@@ -1290,24 +1421,48 @@ class IncrementalCompilation
       Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES)
     }
 
-    /** Recreates the tree [from] at [to] with links to its files; returns the files' stamps. */
-    private fun linkTree(
+    /**
+     * Makes the tree at [to] a tree of links to the files of [from], linking only the files that are
+     * not linked already; returns the stamps of [from]'s files. A file of [to] is a link to the file
+     * of [from] when both are the same file: [to]'s link keeps the file it points to from being
+     * reused, so equal file keys cannot belong to different files. Without file keys, or where links
+     * are not supported, every file is linked or copied again.
+     */
+    private fun syncLinkedTree(
       from: Path,
       to: Path,
     ): Map<String, FileStamp> {
       val stamps = HashMap<String, FileStamp>()
+      val directories = mutableListOf<String>()
       Files.walk(from).use { paths ->
         paths.forEach { source ->
           val relative = from.relativize(source).toString()
-          val target = to.resolve(relative)
           val attributes =
             Files.readAttributes(source, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
           if (attributes.isDirectory) {
-            Files.createDirectories(target)
+            directories.add(relative)
           } else {
             stamps[relative] = FileStamp.of(attributes)
-            linkOrCopy(source, target)
           }
+        }
+      }
+      val linked = if (linksSupported) stamps(to) else emptyMap()
+      var removed = false
+      linked.forEach { (relative, stamp) ->
+        if (stamp.key == null || stamps[relative] != stamp) {
+          Files.delete(to.resolve(relative))
+          removed = true
+        }
+      }
+      if (removed) {
+        removeEmptyDirectories(to)
+      }
+      directories.forEach { Files.createDirectories(to.resolve(it)) }
+      stamps.forEach { (relative, stamp) ->
+        if (stamp.key == null || linked[relative] != stamp) {
+          val target = to.resolve(relative)
+          Files.deleteIfExists(target)
+          linkOrCopy(from.resolve(relative), target)
         }
       }
       return stamps
@@ -1497,6 +1652,19 @@ class IncrementalCompilation
 
       /** The root's entries that are not the state of a target. */
       val RESERVED_NAMES = setOf(INSTANCES_DIR, SNAPSHOTS_DIR, TRASH_DIR)
+
+      /** The backup's trees that persist between compilations, see [begin]. */
+      val LINKED_TREES =
+        Component
+          .values()
+          .filter { it.backup == Backup.LINKED_TREE }
+          .map { it.fileName }
+          .toSet()
+
+      /** The names of the reused output jars in [TargetState.jars], see [packageOutputs]. */
+      const val JAR = "output.jar"
+      const val ABI_JAR = "abi.jar"
+      const val JARS_KEY = "key"
     }
   }
 

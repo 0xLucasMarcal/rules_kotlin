@@ -762,6 +762,11 @@ public class KotlinBuilderJvmBtaIncrementalTest {
      */
     private static void interruptAt(IncrementalCompilation.Checkpoint at) throws IOException {
         compileABC(true);
+        interruptApiChangeAt(at);
+    }
+
+    /** Interrupts the compilation of an API change of the current task at the checkpoint. */
+    private static void interruptApiChangeAt(IncrementalCompilation.Checkpoint at) throws IOException {
         Path saved = Files.createTempDirectory("interrupted");
         Path[] stateDir = new Path[1];
         KotlinJvmTestBuilder.onCheckpoint((checkpoint, dir) -> {
@@ -808,6 +813,67 @@ public class KotlinBuilderJvmBtaIncrementalTest {
     @Test
     public void testInterruptionBeforeTheCommitRestoresTheState() throws IOException {
         assertRecoversFromInterruptionAt(IncrementalCompilation.Checkpoint.RECORDED);
+    }
+
+    // The backup's links outlive a compilation, and the next one links only the changed classes.
+
+    @Test
+    public void testInterruptionAfterAnIncrementalCompilationRestoresItsClasses() throws IOException {
+        compileABC(true);
+        ctx.rerunCompileTask(c -> c.updateSource("C.kt", C_CHANGED));
+        interruptApiChangeAt(IncrementalCompilation.Checkpoint.COMPILED);
+
+        Dep dep = ctx.rerunCompileTask();
+
+        assertThat(ctx.outLines())
+                .contains("|  the previous compilation did not complete, restored the state before it");
+        // C.kt is not compiled again: its classes are the backup's, which must be those of C_CHANGED.
+        assertThat(compiledSources()).doesNotContain("C.kt");
+        assertSameAsFullCompilation(dep, A_WITH_OFFSET, B, C_CHANGED);
+    }
+
+    @Test
+    public void testInterruptionAfterARemovedSourceDoesNotRestoreItsClasses() throws IOException {
+        compileABC(true);
+        ctx.rerunCompileTask(c -> c.removeSource("C.kt"));
+        interruptApiChangeAt(IncrementalCompilation.Checkpoint.COMPILED);
+
+        ctx.rerunCompileTask(c -> c.updateSource("B.kt", "package ic", "fun b(): Int = a() + 3"));
+
+        assertThat(ctx.outLines())
+                .contains("|  the previous compilation did not complete, restored the state before it");
+        assertJarContains(ctx.outputJar(), "ic/AKt.class", "ic/BKt.class");
+        assertJarLacks(ctx.outputJar(), "ic/C.class");
+        assertJarLacks(ctx.outputAbiJar(), "ic/C.class");
+    }
+
+    @Test
+    public void testCompilationThatChangesNoClassesReusesTheJars() {
+        KotlinJvmTestBuilder.restartWorker(new IncrementalCompilationOptions(
+                false, 1, false, true, false, java.time.Duration.ofDays(7)));
+        try {
+            compileABC(true);
+            Map<String, String> classes = jarContents(ctx.outputJar());
+            Map<String, String> abi = jarContents(ctx.outputAbiJar());
+
+            ctx.rerunCompileTask();
+            assertThat(summaryLine()).contains("jars reused");
+            assertThat(jarContents(ctx.outputJar())).isEqualTo(classes);
+            assertThat(jarContents(ctx.outputAbiJar())).isEqualTo(abi);
+
+            Dep dep = ctx.rerunCompileTask(c -> c.updateSource("C.kt", C_CHANGED));
+            assertThat(summaryLine()).doesNotContain("jars reused");
+            assertSameAsFullCompilation(dep, A, B, C_CHANGED);
+        } finally {
+            KotlinJvmTestBuilder.restartWorker();
+        }
+    }
+
+    private static String summaryLine() {
+        return ctx.outLines().stream()
+                .filter(l -> l.startsWith("kotlin incremental compilation: "))
+                .findFirst()
+                .orElseThrow(AssertionError::new);
     }
 
     @Test

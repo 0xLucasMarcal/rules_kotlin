@@ -31,6 +31,12 @@ interface Ksp2EntryPoint {
   /**
    * Execute KSP2 with the given configuration.
    *
+   * @param incremental whether KSP processes against the caches in [cachesDir], updating the
+   *   outputs in place, instead of processing every source.
+   * @param modifiedSources the sources that changed since the caches were written.
+   * @param removedSources the sources that were removed since the caches were written.
+   * @param changedClasses the classpath classes that changed since the caches were written, by
+   *   binary name with nested classes separated by dots.
    * @param logLevel Logger level (0=ERROR, 1=WARN, 2=INFO, 3=LOGGING)
    * @return Exit code (0 for success)
    */
@@ -53,6 +59,11 @@ interface Ksp2EntryPoint {
     jdkHome: File?,
     processorOptions: Map<String, String> = emptyMap(),
     experimentalPsiResolution: Boolean = false,
+    incremental: Boolean = false,
+    incrementalLog: Boolean = false,
+    modifiedSources: List<File> = emptyList(),
+    removedSources: List<File> = emptyList(),
+    changedClasses: List<String> = emptyList(),
     logLevel: Int = 1,
   ): Int
 }
