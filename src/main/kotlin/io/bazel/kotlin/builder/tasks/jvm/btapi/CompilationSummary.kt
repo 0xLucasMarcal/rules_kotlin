@@ -60,6 +60,9 @@ internal class CompilationSummary(
   /** Why the compilation failed, or null if it did not. */
   var failure: String? = null
 
+  /** Whether the output jars are copies of the previous compilation's, or null if not packaged. */
+  var jarsReused: Boolean? = null
+
   /** Runs [block], adding its duration to the [phase]. */
   fun <T> time(
     phase: String,
@@ -87,6 +90,9 @@ internal class CompilationSummary(
         append(" compiled")
       }
       failure?.let { append(", failed: ").append(it) }
+      if (jarsReused == true) {
+        append(", jars reused")
+      }
       phases.forEach { (phase, nanos) ->
         append(", ")
           .append(phase)
@@ -111,6 +117,7 @@ internal class CompilationSummary(
       recompiled?.let { field("recompiled", it) }
       classpathUnchanged?.let { field("classpath_unchanged", it) }
       failure?.let { field("failure", it) }
+      jarsReused?.let { field("jars_reused", it) }
       append("\"phases_ms\":{")
       phases.entries.forEachIndexed { index, (phase, nanos) ->
         if (index > 0) append(',')
