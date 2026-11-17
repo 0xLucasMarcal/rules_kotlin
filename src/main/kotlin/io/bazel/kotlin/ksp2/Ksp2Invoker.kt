@@ -50,6 +50,11 @@ class Ksp2Invoker : Ksp2EntryPoint {
     jdkHome: File?,
     processorOptions: Map<String, String>,
     experimentalPsiResolution: Boolean,
+    incremental: Boolean,
+    incrementalLog: Boolean,
+    modifiedSources: List<File>,
+    removedSources: List<File>,
+    changedClasses: List<String>,
     logLevel: Int,
   ): Int {
     // Load processors via ServiceLoader from this class's own defining classloader
@@ -81,6 +86,11 @@ class Ksp2Invoker : Ksp2EntryPoint {
           this.processorOptions = processorOptions
           this.mapAnnotationArgumentsInJava = true
           this.experimentalPsiResolution = experimentalPsiResolution
+          this.incremental = incremental
+          this.incrementalLog = incrementalLog
+          this.modifiedSources = modifiedSources
+          this.removedSources = removedSources
+          this.changedClasses = changedClasses
         }.build()
 
     // Create logger and execute

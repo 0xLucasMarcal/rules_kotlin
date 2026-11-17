@@ -17,6 +17,7 @@
 
 package io.bazel.kotlin.builder.cmd
 
+import io.bazel.kotlin.builder.tasks.jvm.Ksp2IncrementalOptions
 import io.bazel.kotlin.builder.tasks.jvm.Ksp2Task
 import io.bazel.worker.Worker
 import kotlin.system.exitProcess
@@ -25,8 +26,10 @@ object Ksp2 {
   @JvmStatic
   fun main(args: Array<String>) {
     Worker
-      .from(args.toList()) {
-        start(Ksp2Task())
+      .from(args.toList()) { startupArgs ->
+        // Set with --worker_extra_flag=KotlinKsp2=--experimental_incremental_ksp2[_*]. Startup
+        // flags are not part of the actions' cache keys.
+        start(Ksp2Task(Ksp2IncrementalOptions.fromWorkerFlags(startupArgs)))
       }.run(::exitProcess)
   }
 }
