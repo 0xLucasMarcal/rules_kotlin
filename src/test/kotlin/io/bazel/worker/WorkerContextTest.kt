@@ -23,6 +23,8 @@ import io.bazel.worker.Status.SUCCESS
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.nio.file.Path
+import java.nio.file.Paths
 
 class WorkerContextTest {
   @get:Rule
@@ -39,6 +41,36 @@ class WorkerContextTest {
       }
     }
     assertThat(observedDir).isEqualTo(sandboxDir)
+  }
+
+  @Test
+  fun sandboxedTaskResolvesRequestPathsInTheSandbox() {
+    // Bazel names the sandbox_dir relative to the worker's working directory.
+    val sandboxDir = Paths.get("__sandbox", "1", "_main")
+    val sandbox = Paths.get("").toAbsolutePath().resolve(sandboxDir)
+    var observedDir: Path? = null
+    var resolved: String? = null
+    WorkerContext.run {
+      doTask("sandboxed", sandboxDir = sandboxDir) { ctx ->
+        observedDir = ctx.directory
+        resolved = ctx.paths.resolve("bazel-out/lib.jar")
+        SUCCESS
+      }
+    }
+    assertThat(observedDir).isEqualTo(sandbox)
+    assertThat(resolved).isEqualTo(sandbox.resolve("bazel-out/lib.jar").toString())
+  }
+
+  @Test
+  fun unsandboxedTaskKeepsRequestPaths() {
+    var resolved: String? = null
+    WorkerContext.run {
+      doTask("unsandboxed") { ctx ->
+        resolved = ctx.paths.resolve("bazel-out/lib.jar")
+        SUCCESS
+      }
+    }
+    assertThat(resolved).isEqualTo("bazel-out/lib.jar")
   }
 
   @Test

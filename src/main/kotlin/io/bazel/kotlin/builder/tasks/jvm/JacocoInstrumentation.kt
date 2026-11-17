@@ -3,6 +3,7 @@ package io.bazel.kotlin.builder.tasks.jvm
 import io.bazel.kotlin.builder.utils.bazelRuleKind
 import io.bazel.kotlin.builder.utils.jars.JarCreator
 import io.bazel.kotlin.model.JvmCompilationTask
+import io.bazel.worker.RequestPaths
 import org.jacoco.core.instr.Instrumenter
 import org.jacoco.core.runtime.OfflineInstrumentationAccessGenerator
 import java.nio.file.FileVisitResult
@@ -13,7 +14,11 @@ import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 
-internal fun JvmCompilationTask.createCoverageInstrumentedJar() {
+/**
+ * Produce the primary output jar with the classes instrumented for coverage, and the sources the
+ * coverage report maps them to, named the way the work request names them ([paths]).
+ */
+internal fun JvmCompilationTask.createCoverageInstrumentedJar(paths: RequestPaths) {
   val instrumentedClassesDirectory = Paths.get(directories.coverageMetadataClasses)
   Files.createDirectories(instrumentedClassesDirectory)
 
@@ -33,7 +38,7 @@ internal fun JvmCompilationTask.createCoverageInstrumentedJar() {
     )
   Files.write(
     pathsForCoverage,
-    inputs.javaSourcesList + inputs.kotlinSourcesList,
+    (inputs.javaSourcesList + inputs.kotlinSourcesList).map(paths::relativize),
   )
 
   JarCreator(

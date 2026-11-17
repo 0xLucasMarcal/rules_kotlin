@@ -5,3 +5,11 @@ build --worker_max_instances=1
 build --worker_quit_after_build
 build --profile=/tmp/profile.gz
 build --experimental_worker_max_multiplex_instances=KotlinCompile=5
+
+# Engage multiplex sandboxing: //:kotlin_toolchain declares support for it
+# (experimental_multiplex_sandboxing), this flag activates it for the build, so that each work
+# request runs in its own sandbox directory.
+# Linux/macOS only, as in examples/path_mapping: Bazel sandboxes there.
+common --enable_platform_specific_config
+build:linux --experimental_worker_multiplex_sandboxing
+build:macos --experimental_worker_multiplex_sandboxing

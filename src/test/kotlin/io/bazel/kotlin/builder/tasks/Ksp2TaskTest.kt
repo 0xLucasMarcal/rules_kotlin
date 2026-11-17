@@ -24,12 +24,18 @@ import io.bazel.kotlin.builder.tasks.jvm.Ksp2Task.Companion.getKspClassLoader
 import io.bazel.kotlin.builder.tasks.jvm.Ksp2Task.Companion.parseKspOptions
 import io.bazel.kotlin.builder.utils.ArgMap
 import io.bazel.kotlin.builder.utils.fingerprintOf
+import io.bazel.worker.RequestPaths
 import org.junit.After
+import org.junit.Assume.assumeNoException
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 
 /**
  * Unit tests for KSP2 task argument handling.
@@ -265,6 +271,26 @@ class Ksp2TaskTest {
   }
 
   @Test
+  fun testKspClassLoaderCacheIsSharedAcrossSandboxes() {
+    // Under multiplex sandboxing, each request's sandbox links the same jar at the request path.
+    val jar = tmp.newFile("processor.jar").apply { writeBytes(byteArrayOf(1)) }.toPath()
+    val classpath = listOf("external/ksp/processor.jar")
+    val digests = mapOf("external/ksp/processor.jar" to "v1")
+    val loaders =
+      listOf("1", "2").map { sandbox ->
+        val root = tmp.newFolder("__sandbox", sandbox).toPath()
+        val link = root.resolve(classpath.single())
+        Files.createDirectories(link.parent)
+        symlink(link, jar)
+        getKspClassLoader(classpath, digests, RequestPaths.sandboxed(root))
+      }
+
+    assertThat(loaders[1]).isSameInstanceAs(loaders[0])
+    // The loader outlives the sandbox it was created for: it reads the linked file.
+    assertThat(loaders[0].urLs.map { Paths.get(it.toURI()) }).containsExactly(jar.toRealPath())
+  }
+
+  @Test
   fun testFingerprintIsDeterministic() {
     val classpath = listOf("a.jar")
     val digests = mapOf("a.jar" to "d1")
@@ -300,4 +326,19 @@ class Ksp2TaskTest {
       Class.forName("io.bazel.kotlin.ksp2.Ksp2Invoker", false, javaClass.classLoader)
     assertThat(Ksp2EntryPoint::class.java.isAssignableFrom(invokerClass)).isTrue()
   }
+
+  /** Links [link] to [target], as sandboxes stage inputs; skips the test without link support. */
+  private fun symlink(
+    link: Path,
+    target: Path,
+  ): Path =
+    try {
+      Files.createSymbolicLink(link, target)
+    } catch (e: IOException) {
+      assumeNoException(e)
+      throw e
+    } catch (e: UnsupportedOperationException) {
+      assumeNoException(e)
+      throw e
+    }
 }
