@@ -34,12 +34,20 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
 @Suppress("MemberVisibilityCanBePrivate")
 class KotlinBuilder(
   private val jvmTaskExecutor: JvmTaskExecutor,
+  /**
+   * Whether the tasks compile incrementally: a worker startup flag, so that it stays out of the
+   * actions' command lines and cache keys. Only the Build Tools API compilation supports it.
+   */
+  private val incrementalCompilation: Boolean = false,
 ) {
+  private val legacyIncrementalCompilationReported = AtomicBoolean(false)
+
   companion object {
     @JvmStatic
     private val FLAGFILE_RE = Pattern.compile("""^--flagfile=((.*)-(\d+).params)$""").toRegex()
@@ -81,6 +89,7 @@ class KotlinBuilder(
       GENERATED_JAVA_STUB_JAR("--kapt_generated_stub_jar"),
       GENERATED_CLASS_JAR("--kapt_generated_class_jar"),
       BUILD_KOTLIN("--build_kotlin"),
+      INCREMENTAL_COMPILATION_OPT_OUT("--incremental_compilation_opt_out"),
       STRICT_KOTLIN_DEPS("--strict_kotlin_deps"),
       REDUCED_CLASSPATH_MODE("--reduced_classpath_mode"),
       INSTRUMENT_COVERAGE("--instrument_coverage"),
@@ -135,7 +144,19 @@ class KotlinBuilder(
     val argMap = ArgMaps.from(lines)
     val info = buildTaskInfo(argMap, ctx.inputDigests).build()
     val context =
-      CompilationTaskContext(info, ctx.asPrintStream())
+      CompilationTaskContext(info, ctx.asPrintStream(), inputDigests = ctx.inputDigests)
+    if (incrementalCompilation &&
+      !info.toolchainInfo.hasBtapi() &&
+      legacyIncrementalCompilationReported.compareAndSet(false, true)
+    ) {
+      context.printLines(
+        "warning: incremental compilation disabled",
+        listOf(
+          "it needs the Build Tools API compilation: " +
+            "--@rules_kotlin//kotlin/settings:experimental_build_tools_api=true",
+        ),
+      )
+    }
     return Pair(argMap, context)
   }
 
@@ -185,6 +206,11 @@ class KotlinBuilder(
         )?.let {
           removeDataClassCopyIfConstructorIsPrivate = it == "true"
         }
+      incrementalCompilation =
+        this@KotlinBuilder.incrementalCompilation && toolchainInfoBuilder.hasBtapi()
+      argMap.optionalSingle(KotlinBuilderFlags.INCREMENTAL_COMPILATION_OPT_OUT)?.let {
+        incrementalCompilationOptOut = it == "true"
+      }
       this
     }
 

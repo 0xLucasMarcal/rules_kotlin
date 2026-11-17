@@ -32,7 +32,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
@@ -82,9 +84,43 @@ abstract class KotlinAbstractTestBuilder<T extends JvmCompilationTaskOrBuilder> 
 
     abstract T buildTask();
 
+    /** The digests Bazel would send with the task's work request, by input path. */
+    Map<String, String> inputDigests(T task) {
+        return Collections.emptyMap();
+    }
+
     final String label() {
         return Objects.requireNonNull(label);
     }
+
+    /** A task to come back to with {@link #restore}, e.g. after compiling other tasks. */
+    public static final class SavedTask {
+        private final String label;
+        private final Path instanceRoot;
+        private final Object task;
+
+        private SavedTask(String label, Path instanceRoot, Object task) {
+            this.label = label;
+            this.instanceRoot = instanceRoot;
+            this.task = task;
+        }
+    }
+
+    /** Saves the current task, which a later {@link #restore} makes current again. */
+    public final SavedTask save() {
+        return new SavedTask(label(), instanceRoot(), saveTask());
+    }
+
+    /** Makes a task saved with {@link #save} current again, with its sources and outputs. */
+    public final void restore(SavedTask saved) {
+        label = saved.label;
+        instanceRoot = saved.instanceRoot;
+        restoreTask(saved.task);
+    }
+
+    abstract Object saveTask();
+
+    abstract void restoreTask(Object task);
 
     final Path instanceRoot() {
         return Objects.requireNonNull(instanceRoot);
@@ -160,7 +196,7 @@ abstract class KotlinAbstractTestBuilder<T extends JvmCompilationTaskOrBuilder> 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (PrintStream outputStream = new PrintStream(out)) {
             return operation.apply(new CompilationTaskContext(task.getInfo(), outputStream,
-                    instanceRoot().toAbsolutePath() + File.separator), task);
+                    instanceRoot().toAbsolutePath() + File.separator, inputDigests(task)), task);
         } finally {
             outLines = unmodifiableList(
                     new BufferedReader(new InputStreamReader(new ByteArrayInputStream(out.toByteArray())))

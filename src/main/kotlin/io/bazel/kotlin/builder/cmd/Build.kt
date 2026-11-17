@@ -23,6 +23,8 @@ import io.bazel.kotlin.builder.tasks.KotlinBuilder
 import io.bazel.kotlin.builder.tasks.jvm.InternalCompilerPlugins
 import io.bazel.kotlin.builder.tasks.jvm.KotlinJvmTaskExecutor
 import io.bazel.kotlin.builder.tasks.jvm.btapi.BtapiTaskExecutor
+import io.bazel.kotlin.builder.tasks.jvm.btapi.IncrementalCompilation
+import io.bazel.kotlin.builder.tasks.jvm.btapi.IncrementalCompilationOptions
 import io.bazel.kotlin.builder.toolchain.CompilationTaskContext
 import io.bazel.kotlin.builder.toolchain.KotlinToolchain
 import io.bazel.kotlin.model.JvmCompilationTask
@@ -51,7 +53,11 @@ object Build {
   @JvmStatic
   fun main(args: Array<String>) {
     Worker
-      .from(args.toList()) {
+      .from(args.toList()) { startupArgs ->
+        // Set with --worker_extra_flag=KotlinCompile=--experimental_incremental_compilation[_*].
+        // Startup flags are not part of the actions' cache keys, so incremental and
+        // non-incremental builds share cache entries.
+        val incrementalCompilation = IncrementalCompilationOptions.fromWorkerFlags(startupArgs)
         val toolchain = KotlinToolchain.createToolchain()
         val plugins =
           InternalCompilerPlugins(
@@ -63,10 +69,20 @@ object Build {
           DispatchingTaskExecutor(
             legacyExecutor = KotlinJvmTaskExecutor(toolchain, plugins),
             btapiFactory = {
-              BtapiTaskExecutor(toolchain.btapiClassLoader)
+              BtapiTaskExecutor(
+                toolchain.btapiClassLoader,
+                IncrementalCompilation(
+                  BtapiTaskExecutor.DEFAULT_INCREMENTAL_COMPILATION_ROOT,
+                  incrementalCompilation ?: IncrementalCompilationOptions(),
+                ),
+              )
             },
           )
-        val builder = KotlinBuilder(jvmTaskExecutor)
+        val builder =
+          KotlinBuilder(
+            jvmTaskExecutor,
+            incrementalCompilation = incrementalCompilation != null,
+          )
         start(CompileKotlin(builder))
       }.run(::exitProcess)
   }

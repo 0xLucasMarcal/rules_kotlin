@@ -30,6 +30,7 @@ import io.bazel.kotlin.model.JvmCompilationTask.Directories
 import java.nio.file.Files
 import java.nio.file.Files.isDirectory
 import java.nio.file.Files.walk
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.util.stream.Stream
@@ -44,13 +45,18 @@ internal fun JvmCompilationTask.preProcessingSteps(
 /**
  * Produce the primary output jar.
  */
-internal fun JvmCompilationTask.createOutputJar() =
+internal fun JvmCompilationTask.createOutputJar() = createOutputJar(Paths.get(directories.classes))
+
+/**
+ * Produce the primary output jar, with the Kotlin classes compiled to [classes].
+ */
+internal fun JvmCompilationTask.createOutputJar(classes: Path) =
   JarCreator(
     path = Paths.get(outputs.jar),
     normalize = true,
     verbose = false,
   ).also {
-    it.addDirectory(Paths.get(directories.classes))
+    it.addDirectory(classes)
     it.addDirectory(Paths.get(directories.javaClasses))
     it.addDirectory(Paths.get(directories.generatedClasses))
     it.setJarOwner(info.label, info.bazelRuleKind)
@@ -60,13 +66,18 @@ internal fun JvmCompilationTask.createOutputJar() =
 /**
  * Produce the ABI output jar.
  */
-internal fun JvmCompilationTask.createAbiJar() =
+internal fun JvmCompilationTask.createAbiJar() = createAbiJar(Paths.get(directories.abiClasses))
+
+/**
+ * Produce the ABI output jar, with the ABI classes written to [abiClasses].
+ */
+internal fun JvmCompilationTask.createAbiJar(abiClasses: Path) =
   JarCreator(
     path = Paths.get(outputs.abijar),
     normalize = true,
     verbose = false,
   ).also {
-    it.addDirectory(Paths.get(directories.abiClasses))
+    it.addDirectory(abiClasses)
     it.addDirectory(Paths.get(directories.generatedClasses))
     it.setJarOwner(info.label, info.bazelRuleKind)
     it.execute()

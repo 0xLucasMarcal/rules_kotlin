@@ -115,10 +115,10 @@ use_repo(rules_kotlin_extensions, "com_github_google_ksp", "com_github_jetbrains
 When a toolchain enables the Build Tools API compilation (`experimental_build_tools_api`), it
 compiles with a Build Tools API runtime: `kotlin-build-tools-impl`, the `kotlin-compiler-embeddable`
 it loads, the embeddable compiler plugins `kotlin-annotation-processing-embeddable` and
-`jvm-abi-gen`, and the four libraries of the release the compiler needs. One implementation record
-names all of them with one version and one checksum each, and one repository is built from each
-record. The repository `@btapi_impl` holds the record of the release the rules bundle, and the
-default toolchain uses its runtime, `@rules_kotlin//kotlin/compiler:btapi_runtime`.
+`jvm-abi-gen`, and the five libraries of the release the compiler and the implementation need. One
+implementation record names all of them with one version and one checksum each, and one repository
+is built from each record. The repository `@btapi_impl` holds the record of the release the rules
+bundle, and the default toolchain uses its runtime, `@rules_kotlin//kotlin/compiler:btapi_runtime`.
 
 To compile with another release, declare a record under a repository name of your choice and give
 its runtime to a toolchain. Several records coexist, one toolchain each:
@@ -136,6 +136,7 @@ rules_kotlin_extensions.btapi_impl_version(
     reflect_sha256 = "...",
     daemon_client_sha256 = "...",
     script_runtime_sha256 = "...",
+    tooling_core_sha256 = "...",
 )
 use_repo(rules_kotlin_extensions, "kotlin_2_4_0")
 ```
@@ -298,6 +299,81 @@ build --@rules_kotlin//kotlin/settings:experimental_build_tools_api=true
 
 Alternatively, enable it for a single toolchain via `define_kt_toolchain(experimental_build_tools_api = True)`
 or by giving the toolchain a `btapi_runtime`. Any of these switches is sufficient; all default to `False`.
+
+## Incremental compilation
+
+**Experimental.** With incremental compilation, a `KotlinCompile` action recompiles only the
+sources affected by a change instead of the whole target. It needs the Build Tools API compilation,
+and is turned on with a flag of the persistent workers:
+
+```
+build --@rules_kotlin//kotlin/settings:experimental_build_tools_api=true
+build --worker_extra_flag=KotlinCompile=--experimental_incremental_compilation
+```
+
+Worker flags are not part of the actions' cache keys, so a build that compiles incrementally is
+served from the cache entries of builds that do not, e.g. those CI uploads. The outputs of an
+incremental compilation are the outputs of a full compilation, but they depend on state outside the
+action's inputs: keep machines that compile incrementally from uploading to a shared cache, e.g.
+with `--noremote_upload_local_results`, and let CI, which compiles from scratch, fill it.
+
+How it works:
+
+* The worker keeps the state of each target under `bazel-out/_kotlin_ic`: the compiler's
+  incremental caches, the classes, the ABI classes, and the dependencies of each source. It creates
+  the output jars from the state directly. `bazel clean` removes it.
+* The state is lazy by default: the first compilation of a target is a plain compilation that only
+  records a marker, and the target's next compilation, a sign that someone iterates on it, creates
+  the state. Cold builds and CI, which compile each target once, pay nothing for incremental
+  compilation; the first incremental compilation of a target comes one compilation later.
+* The worker identifies file contents by the input digests Bazel sends with each work request,
+  computed with the build's `--digest_function`, and computes the changed and removed sources from
+  them. Changes in dependencies, including added and removed ones, are detected from snapshots of
+  the classpath entries, which the worker caches by digest. When the digests of the classpath are
+  those of the previous compilation, the compiler skips comparing the snapshots.
+* The jdeps plugin records the dependencies of each source it analyzes, and the worker keeps those
+  of the sources it did not recompile. The jdeps of an incremental compilation are the jdeps of a
+  full compilation, and strict deps are checked against every source.
+* A source that used a jar no longer on the classpath is recompiled, so that its dependencies are
+  recorded again: the compiler sees no change in a jar that moved with the same contents.
+* A compilation that does not complete leaves the state as it was. Before the compiler changes the
+  state, the worker backs it up (linking the class files and copying the caches) and marks the
+  compilation in progress. A compilation error or a cancelled request restores the backup at once;
+  a killed worker, e.g. when Bazel stops a worker it cannot cancel because another action failed or
+  a remote execution won, leaves the compilation in progress, and the next compilation of the
+  target restores the backup. Other failures, e.g. an internal compiler error, discard the state.
+* Changes to the compilation configuration fall back to a full compile: the compiler options,
+  the compiler plugins and their options, the friend paths, and the requested outputs.
+* These targets compile non-incrementally:
+  * targets without sources outside source jars and generated directories, e.g. generated protos;
+  * targets tagged `kt_no_incremental_compilation`;
+  * targets built for the exec configuration (tools), whose state would duplicate that of the same
+    targets built for the target configuration;
+  * targets that run kapt, and targets with compiler plugin options that refer to the action's
+    directories (`{generatedClasses}`, `{stubs}`, `{temp}`, `{generatedSources}`).
+* The worker deletes the state of targets no compilation used for 7 days and the classpath
+  snapshots no compilation used for 3 days, and writes the sizes of the state to
+  `bazel-out/_kotlin_ic/usage.json`, once a day or when it deletes state.
+
+More worker flags, each set with `--worker_extra_flag=KotlinCompile=<flag>`, tune it:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--experimental_incremental_compilation_state=lazy\|eager` | `lazy` | `eager` creates the state on a target's first compilation. |
+| `--experimental_incremental_compilation_min_sources=N` | `1` | Targets with fewer sources outside source jars and generated directories compile non-incrementally. |
+| `--experimental_incremental_compilation_exec_configuration` | off | Also compile targets built for the exec configuration incrementally. |
+| `--experimental_incremental_compilation_summary` | off | Print one line per compilation: incremental, full, plain or skipped and why, the sources compiled out of the total, and the time of each phase. |
+| `--experimental_incremental_compilation_log` | off | Append the same as a JSON record per compilation to `bazel-out/_kotlin_ic/log.jsonl`. |
+| `--experimental_incremental_compilation_retention_days=N` | `7` | How long the state of an unused target is kept. |
+
+Like the main flag, these flags are not part of the actions' cache keys, so they do not invalidate
+any action: use the summary or the log, rather than `--define=kt_trace=1`, to benchmark.
+
+Actions that do not run in a persistent worker, e.g. remotely, compile from scratch each time. So
+do sandboxed singleplex workers (`--worker_sandboxing` with `experimental_multiplex_workers =
+False`): Bazel resets their directory before each request, which a worker notices on its second
+request; it then prints a warning and stops keeping state. Build with `--define=kt_trace=1` to see
+which sources the compiler recompiled and why.
 
 # Pruning transitive dependencies
 

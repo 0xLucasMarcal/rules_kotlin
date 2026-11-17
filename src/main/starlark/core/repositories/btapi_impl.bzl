@@ -22,6 +22,7 @@ _ARTIFACTS = [
     struct(artifact_id = "kotlin-stdlib", field = "stdlib", runtime_attr = "libraries"),
     struct(artifact_id = "kotlin-reflect", field = "reflect", runtime_attr = "libraries"),
     struct(artifact_id = "kotlin-script-runtime", field = "script_runtime", runtime_attr = "libraries"),
+    struct(artifact_id = "kotlin-tooling-core", field = "tooling_core", runtime_attr = "libraries"),
 ]
 
 # The runtime members every record shares. They are not versioned with the Kotlin release: the
@@ -56,12 +57,13 @@ def btapi_impl_version(
         stdlib_sha256,
         reflect_sha256,
         daemon_client_sha256,
-        script_runtime_sha256):
+        script_runtime_sha256,
+        tooling_core_sha256):
     """Describes the Build Tools API implementation of one Kotlin release.
 
     The record is versioned by kotlin-build-tools-impl. It lists the implementation, the
     same-version embeddable compiler it loads, the two embeddable-dialect plugins of that compiler,
-    and the four libraries of the release the compiler needs. Every checksum is required.
+    and the five libraries of the release the compiler and the implementation need. Every checksum is required.
 
     The defined implementation is expected to be compatible with the Build Tools API jar from the rule_kotlin release the worker is compiled against.
     Expected compatibility guarantee: the API supports implementations from three version lines back to one line forward.
@@ -76,6 +78,7 @@ def btapi_impl_version(
         reflect_sha256: the checksum of kotlin-reflect.
         daemon_client_sha256: the checksum of kotlin-daemon-client.
         script_runtime_sha256: the checksum of kotlin-script-runtime.
+        tooling_core_sha256: the checksum of kotlin-tooling-core.
 
     Returns:
         a composite with one version attribute and one struct per artifact, each holding
@@ -90,6 +93,7 @@ def btapi_impl_version(
         "reflect": reflect_sha256,
         "script_runtime": script_runtime_sha256,
         "stdlib": stdlib_sha256,
+        "tooling_core": tooling_core_sha256,
     }
     return struct(
         version = version,
